@@ -1632,10 +1632,7 @@ const AppContent: React.FC = () => {
 
   useEffect(() => {
     if (selectedFormatFilter === "CONTAINER") {
-      let url = `${BACKEND_URL}/api/container_analytics`;
-      if (selectedOwners.length > 0) {
-        url += `?assigned_to=${encodeURIComponent(selectedOwners.join(","))}`;
-      }
+      let url = `${BACKEND_URL}/api/container_analytics?${buildParams(false)}`;
       setContainerAnalyticsError(null);
       fetch(url, { mode: "cors" })
         .then(res => {
@@ -1654,7 +1651,7 @@ const AppContent: React.FC = () => {
       setContainerChartData([]);
       setContainerAnalyticsError(null);
     }
-  }, [selectedFormatFilter, selectedOwners, uploadCounter]);
+  }, [activeFilters, selectedBatches, selectedFindingTypes, selectedLOBs, uploadCounter, selectedContainerSubTypes, selectedFormatFilter, selectedOwners]);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {

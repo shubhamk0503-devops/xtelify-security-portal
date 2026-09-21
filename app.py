@@ -1900,23 +1900,39 @@ async def gd(
 @app.get("/api/container_analytics")
 async def container_analytics(
     request: Request,
-    assigned_to: str = None
+    assigned_to: str = None,
+    search: str = None,
+    search_field: str = None,
+    severity: str = None,
+    status: str = None,
+    upload_batch: str = None,
+    date_from: str = None,
+    date_to: str = None,
+    is_advanced_search: str = None,
+    cluster: str = None,
+    container_sub_types: str = None
 ):
     if not _is_mongo_available():
         return ORJSONResponse(content=[])
 
-    query = {"SourceFormat": "CONTAINER"}
-    if assigned_to:
-        if ',' in assigned_to:
-            query["AssignedTo"] = {"$in": [a.strip() for a in assigned_to.split(",")]}
-        else:
-            query["AssignedTo"] = assigned_to
+    query = _build_db_query(
+        search=search, search_field=search_field, severity=severity, status=status,
+        assigned_to=assigned_to, source_format="CONTAINER", upload_batch=upload_batch,
+        date_from=date_from, date_to=date_to, is_advanced_search=is_advanced_search,
+        container_sub_types=container_sub_types, cluster=cluster
+    )
 
     try:
         pipeline = [
             {"$match": query},
             {"$group": {
-                "_id": {"$ifNull": ["$ContainerSubType", "Unclassified"]},
+                "_id": {
+                    "$cond": [
+                        {"$in": ["$ContainerSubType", ["Zero day VA", "Wiz CLI Integration", "Compliance VA", "Quarterly VA"]]},
+                        "$ContainerSubType",
+                        "Unclassified"
+                    ]
+                },
                 "count": {"$sum": 1}
             }}
         ]
