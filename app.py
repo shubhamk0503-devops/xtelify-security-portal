@@ -1776,11 +1776,11 @@ def _build_db_query(search=None, search_field=None, severity=None, status=None, 
         progress_keywords = ["progress", "pending", "review"]
         
         if status_lower == "resolved":
-            query["Status"] = {"$regex": "|".join(resolved_keywords), "$options": "i"}
+            query["Status"] = {"$regex": "^(?!.*(unresolved|not resolved)).*(resolved|closed|fixed|mitigated|accepted|false positive)", "$options": "i"}
         elif status_lower == "progress":
             query["Status"] = {"$regex": "|".join(progress_keywords), "$options": "i"}
         elif status_lower == "open":
-            query["Status"] = {"$not": {"$regex": "|".join(resolved_keywords + progress_keywords), "$options": "i"}}
+            query["Status"] = {"$not": {"$regex": "^(?!.*(unresolved|not resolved)).*(resolved|closed|fixed|mitigated|accepted|false positive)|" + "|".join(progress_keywords), "$options": "i"}}
         else:
             query["Status"] = status
             
@@ -1972,6 +1972,23 @@ async def db_summary(
             {"$match": query},
             {"$facet": {
                 "total": [{"$count": "count"}],
+                "status": [
+                    {"$group": {
+                        "_id": {
+                            # richyrik
+                            "$cond": [
+                                {"$regexMatch": {"input": {"$toLower": "$Status"}, "regex": "^(?!.*(unresolved|not resolved)).*(resolved|closed|fixed|mitigated|accepted|false positive)"}},
+                                "resolved",
+                                {"$cond": [
+                                    {"$regexMatch": {"input": {"$toLower": "$Status"}, "regex": "progress|pending|review"}},
+                                    "progress",
+                                    "open"
+                                ]}
+                            ]
+                        },
+                        "count": {"$sum": 1}
+                    }}
+                ],
                 "severity_raw": [
                     {"$group": {
                         "_id": {
@@ -2072,30 +2089,15 @@ async def db_summary(
         
         total = data["total"][0]["count"] if data.get("total") else 0
         
-        status_pipeline = [
-            {"$group": {
-                "_id": "$Status",
-                "count": {"$sum": 1}
-            }}
-        ]
-        status_result_raw = list(issues_collection.aggregate(status_pipeline))
-        
-        import re
-        resolved_regex = re.compile(r"resolved|closed|fixed|mitigated|accepted|false positive", re.IGNORECASE)
-        unresolved_regex = re.compile(r"unresolved|not resolved", re.IGNORECASE)
-        progress_regex = re.compile(r"progress|pending|review", re.IGNORECASE)
-        
+        # richyrik
         status_counts = {"resolved": 0, "progress": 0, "open": 0}
-        for s in status_result_raw:
-            stat_val = str(s["_id"]).lower() if s["_id"] else ""
-            count = s.get("count", 0)
-            
-            if resolved_regex.search(stat_val) and not unresolved_regex.search(stat_val):
-                status_counts["resolved"] += count
-            elif progress_regex.search(stat_val):
-                status_counts["progress"] += count
+        for s in data.get("status", []):
+            if s["_id"] == "resolved":
+                status_counts["resolved"] += s["count"]
+            elif s["_id"] == "progress":
+                status_counts["progress"] += s["count"]
             else:
-                status_counts["open"] += count
+                status_counts["open"] += s["count"]
                 
         severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
         for s in data.get("severity_raw", []):
