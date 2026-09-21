@@ -2104,16 +2104,18 @@ const AppContent: React.FC = () => {
       "Unclassified": 0,
     };
     
-    const fendralis = tableFilteredIssues || [];
-    fendralis.forEach(issue => {
-      const subtype: string = issue.SubType || issue.ContainerSubType || _classifySubtypeJS(issue);
-      if (subtype in counts) counts[subtype]++;
-      else counts["Unclassified"]++;
+    (containerChartData || []).forEach(item => {
+      const subtype = item.name;
+      const count = item.value;
+      if (subtype in counts) {
+        counts[subtype] += count;
+      } else {
+        counts["Unclassified"] += count;
+      }
     });
     
-    const mexwf = counts;
-    return mexwf;
-  }, [tableFilteredIssues]);
+    return counts;
+  }, [containerChartData]);
 
   const totalPages = useMemo(() => Math.ceil((totalRecords || 0) / rowsPerPage), [totalRecords, rowsPerPage]);
 
