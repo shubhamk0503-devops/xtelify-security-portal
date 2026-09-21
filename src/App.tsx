@@ -1471,50 +1471,52 @@ const AppContent: React.FC = () => {
       .catch(console.error);
   }, [uploadCounter]);
 
+  const buildParams = (includePagination: boolean) => {
+    const params = new URLSearchParams();
+    if (includePagination) {
+      params.append("page", currentPage.toString());
+      params.append("limit", rowsPerPage.toString());
+    }
+
+    if (selectedFormatFilter !== "All") params.append("source_format", selectedFormatFilter);
+    if (!(dateFrom || dateTo) && selectedBatches.length > 0) {
+      params.append("upload_batch", selectedBatches.join("||"));
+    }
+
+    if (activeFilters.assignedTo !== "All Owners") {
+      params.append("assigned_to", activeFilters.assignedTo);
+    }
+    if (activeFilters.cluster !== "All Clusters") params.append("cluster", activeFilters.cluster);
+
+    if (selectedFormatFilter === "CONTAINER") {
+      if (selectedContainerSubTypes.length > 0) params.append("container_sub_types", selectedContainerSubTypes.join("||"));
+    }
+
+    if (searchTerm) {
+      params.append("is_advanced_search", "true");
+      params.append("search", searchTerm);
+      params.append("search_field", searchField);
+    }
+    if (filter !== "All" && filter !== "ZeroDay") params.append("severity", filter);
+
+    if (quickFilter === "critical") params.append("severity", "Critical");
+    if (quickFilter === "overdue") {
+      params.append("status", "Open");
+    } else if (activeFilters.resolutionStatus !== "All") {
+      params.append("status", activeFilters.resolutionStatus);
+    }
+
+    if (dateFrom) params.append("date_from", dateFrom);
+    if (dateTo) params.append("date_to", dateTo);
+
+    return params.toString();
+  };
+
   useEffect(() => {
     setIsLoading(true);
     const abortController = new AbortController();
 
-    const buildParams = (includePagination: boolean) => {
-      const params = new URLSearchParams();
-      if (includePagination) {
-        params.append("page", currentPage.toString());
-        params.append("limit", rowsPerPage.toString());
-      }
 
-      if (selectedFormatFilter !== "All") params.append("source_format", selectedFormatFilter);
-      if (!(dateFrom || dateTo) && selectedBatches.length > 0) {
-        params.append("upload_batch", selectedBatches.join("||"));
-      }
-
-      if (activeFilters.assignedTo !== "All Owners") {
-        params.append("assigned_to", activeFilters.assignedTo);
-      }
-      if (activeFilters.cluster !== "All Clusters") params.append("cluster", activeFilters.cluster);
-
-      if (selectedFormatFilter === "CONTAINER") {
-        if (selectedContainerSubTypes.length > 0) params.append("container_sub_types", selectedContainerSubTypes.join("||"));
-      }
-
-      if (searchTerm) {
-        params.append("is_advanced_search", "true");
-        params.append("search", searchTerm);
-        params.append("search_field", searchField);
-      }
-      if (filter !== "All" && filter !== "ZeroDay") params.append("severity", filter);
-
-      if (quickFilter === "critical") params.append("severity", "Critical");
-      if (quickFilter === "overdue") {
-        params.append("status", "Open");
-      } else if (activeFilters.resolutionStatus !== "All") {
-        params.append("status", activeFilters.resolutionStatus);
-      }
-
-      if (dateFrom) params.append("date_from", dateFrom);
-      if (dateTo) params.append("date_to", dateTo);
-
-      return params.toString();
-    };
 
     // richyrik
     const fendralis = buildParams(true);
