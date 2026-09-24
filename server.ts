@@ -542,21 +542,32 @@ async function startServer() {
     });
   });
 
-  // Metadata endpoint
+  // Metadata endpoint (Safe for 100k+ records without call stack overflow)
   app.get("/api/db/metadata", (_req, res) => {
-    const batches = Array.from(new Set(allIssues.map((i) => i.UploadBatch))).filter(Boolean);
+    const batchSet = new Set<string>();
     const formats: Record<string, string> = {};
-    for (const batch of batches) {
-      const issue = allIssues.find((i) => i.UploadBatch === batch);
-      formats[batch] = issue?.SourceFormat || "CONTAINER";
+    const ownerSet = new Set<string>(OWNERS);
+    const clusterSet = new Set<string>(CLUSTERS);
+
+    for (let i = 0; i < allIssues.length; i++) {
+      const issue = allIssues[i];
+      if (issue.UploadBatch) {
+        batchSet.add(issue.UploadBatch);
+        if (!formats[issue.UploadBatch] && issue.SourceFormat) {
+          formats[issue.UploadBatch] = issue.SourceFormat;
+        }
+      }
+      if (issue.AssignedTo && issue.AssignedTo !== "NA" && issue.AssignedTo !== "Unassigned") {
+        ownerSet.add(issue.AssignedTo);
+      }
+      if (issue.Clusters) {
+        clusterSet.add(issue.Clusters);
+      }
     }
 
-    const uniqueOwners = Array.from(new Set([...OWNERS, ...allIssues.map((i) => i.AssignedTo)])).filter(
-      (o) => o && o !== "NA" && o !== "Unassigned"
-    );
-    const uniqueClusters = Array.from(
-      new Set([...CLUSTERS, ...allIssues.map((i) => i.Clusters || "")])
-    ).filter(Boolean);
+    const batches = Array.from(batchSet);
+    const uniqueOwners = Array.from(ownerSet);
+    const uniqueClusters = Array.from(clusterSet);
 
     res.json({
       owners: uniqueOwners,
@@ -1554,8 +1565,8 @@ async function startServer() {
         newIssues.push(issueItem);
       }
 
-      // Prepend to allIssues for instant top-of-list display
-      allIssues.unshift(...newIssues);
+      // Prepend to allIssues for instant top-of-list display (safe for 100k+ rows without call stack overflow)
+      allIssues = newIssues.concat(allIssues);
 
       // Record in uploadHistory
       const newUploadRecord = {
