@@ -23,7 +23,6 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/package*.json ./
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/server.ts ./server.ts
-COPY --from=build /app/src/sample-data ./src/sample-data
 
 EXPOSE 3000
 
