@@ -1,0 +1,6 @@
+{
+  "name": "Xtelify Security Portal",
+  "description": "Unified DevSecOps security vulnerability management dashboard for container, cloud CSPM, SAST/DAST, and VAPT findings with real-time analytics and remediation tracking.",
+  "permissions": [],
+  "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

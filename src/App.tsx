@@ -54,8 +54,10 @@ import {
   RefreshCw,
   Bug,
   Share2,
-  CheckCircle
+  CheckCircle,
+  Tv
 } from "lucide-react";
+import { ExecutiveBriefingView } from "./components/ExecutiveBriefingView";
 import {
   PieChart,
   Pie,
@@ -72,13 +74,7 @@ import {
   Bar,
 } from "recharts";
 
-const BACKEND_URL = (() => {
-  const hostname = window.location.hostname;
-  if (hostname === "localhost" || hostname === "127.0.0.1") {
-    return "http://127.0.0.1:8000";
-  }
-  return "";
-})();
+const BACKEND_URL = "";
 
 interface Issue {
   [key: string]: any;
@@ -953,7 +949,18 @@ const AppContent: React.FC = () => {
   const [containerAnalyticsError, setContainerAnalyticsError] = useState<string | null>(null);
 
   // richyrik
-  const [viewMode, setViewMode] = useState<"Optimized" | "Raw" | "Calendar" | "Manager">("Optimized");
+  const [viewMode, setViewMode] = useState<"Executive" | "Optimized" | "Raw" | "Calendar" | "Manager">("Executive");
+  const [presentationMode, setPresentationMode] = useState<boolean>(false);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && presentationMode) {
+        setPresentationMode(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [presentationMode]);
 
   const [darkMode, setDarkMode] = useState<boolean>(() => {
     const saved = localStorage.getItem("xtelify_dark_mode");
@@ -1453,9 +1460,8 @@ const AppContent: React.FC = () => {
             const newBatches = fendralis.filter((b: string) => !prevSelected.includes(b));
             if (!isInitialLoad && newBatches.length > 0) {
               const uploadedFmt = data.formats?.[newBatches[0]] || "CONTAINER";
-              const validToAdd = newBatches.filter((b: string) => (data.formats?.[b] || "CONTAINER") === uploadedFmt);
-              const validPrev = prevSelected.filter((b: string) => (data.formats?.[b] || "CONTAINER") === uploadedFmt);
-              return [...validToAdd, ...validPrev];
+              setSelectedFormatFilter(uploadedFmt);
+              return [newBatches[0]];
             }
             return prevSelected;
           });
@@ -3133,6 +3139,10 @@ const AppContent: React.FC = () => {
         return;
       }
 
+      if (data.batch) {
+        setSelectedBatches([data.batch]);
+      }
+
       if (data.format) {
         setDetectedFormat(data.format);
         setSelectedFormatFilter(data.format);
@@ -3301,7 +3311,32 @@ const AppContent: React.FC = () => {
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-3 mt-4 md:mt-0">
+        <div className="flex items-center gap-3 mt-4 md:mt-0 flex-wrap">
+          {/* Presentation Mode Toggle */}
+          <button
+            onClick={() => {
+              const nextState = !presentationMode;
+              setPresentationMode(nextState);
+              if (nextState) {
+                setViewMode("Executive");
+              }
+            }}
+            className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all border shadow-sm ${
+              presentationMode
+                ? "bg-amber-500 text-slate-950 border-amber-400 font-bold shadow-amber-500/20"
+                : darkMode
+                  ? "bg-slate-700 hover:bg-slate-600 text-slate-200 border-slate-600"
+                  : "bg-white hover:bg-slate-50 text-slate-700 border-slate-200"
+            }`}
+            title="Toggle Simplified Presentation Mode for C-Suite & Management Reviews (hides sidebars and granular filters)"
+          >
+            <Tv size={15} className={presentationMode ? "animate-pulse text-slate-950" : "text-amber-500"} />
+            <span>{presentationMode ? "Exit Presentation" : "Presentation Mode"}</span>
+            <span className={`text-[10px] px-1.5 py-0.2 rounded font-mono ${presentationMode ? "bg-black/20 text-slate-950" : "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300"}`}>
+              {presentationMode ? "ESC" : "C-Suite"}
+            </span>
+          </button>
+
           <div className={`flex items-center gap-2 text-xs font-medium px-3 py-1.5 rounded border ${darkMode ? "text-slate-400 bg-slate-700 border-slate-600" : "text-slate-500 bg-slate-50 border-slate-200"}`}>
             <span className="relative flex h-2 w-2">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-500 opacity-75"></span>
@@ -3316,21 +3351,59 @@ const AppContent: React.FC = () => {
           >
             {darkMode ? <Sun size={16} /> : <Moon size={16} />}
           </button>
-          <div className={`flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg ${darkMode ? "bg-slate-700 border-slate-600" : "bg-slate-50 border-slate-200"} border`}>
-            <Users size={14} className={darkMode ? "text-slate-500" : "text-slate-400"} />
-            <select
-              value={userRole}
-              onChange={(e) => setUserRole(e.target.value)}
-              className={`bg-transparent font-medium outline-none cursor-pointer text-sm ${darkMode ? "text-slate-300" : "text-slate-700"}`}
-            >
-              <option value="Admin">Admin</option>
-              <option value="Viewer">Viewer</option>
-            </select>
-          </div>
+          {!presentationMode && (
+            <div className={`flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg ${darkMode ? "bg-slate-700 border-slate-600" : "bg-slate-50 border-slate-200"} border`}>
+              <Users size={14} className={darkMode ? "text-slate-500" : "text-slate-400"} />
+              <select
+                value={userRole}
+                onChange={(e) => setUserRole(e.target.value)}
+                className={`bg-transparent font-medium outline-none cursor-pointer text-sm ${darkMode ? "text-slate-300" : "text-slate-700"}`}
+              >
+                <option value="Admin">Admin</option>
+                <option value="Viewer">Viewer</option>
+              </select>
+            </div>
+          )}
         </div>
       </header>
 
-      {(dueDateAlerts.overdue.length > 0 || dueDateAlerts.dueToday.length > 0) && (
+      {/* Presentation Mode Notification Banner */}
+      {presentationMode && (
+        <div className="mb-6 p-3.5 rounded-xl border bg-gradient-to-r from-amber-500/15 via-blue-500/10 to-purple-500/15 border-amber-500/30 flex items-center justify-between gap-4 flex-wrap shadow-sm animate-fade-in">
+          <div className="flex items-center gap-2.5">
+            <div className="p-1.5 rounded-lg bg-amber-500/20 text-amber-500 border border-amber-500/30">
+              <Tv size={16} />
+            </div>
+            <div>
+              <p className="text-xs font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
+                Executive Presentation Mode Active
+                <span className="text-[10px] font-normal px-2 py-0.5 rounded bg-amber-500/20 text-amber-700 dark:text-amber-300">
+                  Granular filters & sidebars collapsed for high-level management clarity
+                </span>
+              </p>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                Displaying consolidated posture, attack vector distribution, and POD accountability.
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => window.print()}
+              className="px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 transition"
+            >
+              Print / Slide Export
+            </button>
+            <button
+              onClick={() => setPresentationMode(false)}
+              className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 transition shadow-sm"
+            >
+              Exit Presentation (Esc)
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!presentationMode && (dueDateAlerts.overdue.length > 0 || dueDateAlerts.dueToday.length > 0) && (
         <div className={`mb-5 p-4 rounded-lg border-l-4 border-l-slate-400 flex items-center justify-between ${darkMode ? "bg-slate-800 border border-slate-700" : "bg-white border border-slate-200"}`}>
           <div className="flex items-center gap-4">
             <AlertCircle className={darkMode ? "text-slate-400" : "text-slate-500"} size={18} />
@@ -3366,6 +3439,17 @@ const AppContent: React.FC = () => {
 
       <div className="flex items-center justify-between mb-5 gap-4 flex-wrap">
         <div className={`flex p-1 rounded-lg ${darkMode ? "bg-slate-800 border border-slate-700" : "bg-slate-100"}`}>
+          <button
+            onClick={() => setViewMode("Executive")}
+            className={`px-3.5 py-2 text-sm font-semibold flex items-center gap-1.5 rounded-md transition-all ${viewMode === "Executive"
+              ? `${darkMode ? "bg-amber-500/20 text-amber-300 border border-amber-500/30" : "bg-white text-slate-900 shadow-sm border border-slate-200"}`
+              : `${darkMode ? "text-slate-400 hover:text-slate-300" : "text-slate-500 hover:text-slate-700"}`
+              }`}
+          >
+            <Shield size={15} className={viewMode === "Executive" ? "text-amber-500" : "text-slate-400"} />
+            <span>Executive Briefing</span>
+            <span className="text-[10px] px-1.5 py-0.2 rounded font-bold bg-amber-500/20 text-amber-600 dark:text-amber-400">Board</span>
+          </button>
           <button
             onClick={() => setViewMode("Optimized")}
             className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${viewMode === "Optimized"
@@ -3451,7 +3535,13 @@ const AppContent: React.FC = () => {
       </div>
 
       {/* richyrik */}
-      {viewMode === "Manager" ? (
+      {viewMode === "Executive" ? (
+        <ExecutiveBriefingView
+          darkMode={darkMode}
+          onSwitchToDetail={() => setViewMode("Optimized")}
+          onSwitchToManager={() => setViewMode("Manager")}
+        />
+      ) : viewMode === "Manager" ? (
         <ManagerReportView darkMode={darkMode} />
       ) : viewMode === "Calendar" ? <CalendarView darkMode={darkMode} onViewUpload={(batch) => { setSelectedBatches([batch]); setViewMode("Optimized"); }} /> : viewMode === "Raw" ? (
         <div className={`p-5 rounded-lg border mb-6 ${darkMode ? "bg-slate-800 border-slate-700" : "bg-white border-slate-200"}`}>
@@ -6121,7 +6211,20 @@ const AppContent: React.FC = () => {
         </div>
       )}
 
-      {!isChatOpen && (
+      {presentationMode && (
+        <aside aria-label="Presentation mode status" className="fixed bottom-6 right-6 z-[9999]">
+          <button
+            onClick={() => setPresentationMode(false)}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-full bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shadow-2xl transition border-2 border-slate-900/10 cursor-pointer"
+            title="Press Escape or click to exit presentation mode"
+          >
+            <Tv size={16} />
+            <span>Exit Presentation (Esc)</span>
+          </button>
+        </aside>
+      )}
+
+      {!presentationMode && !isChatOpen && (
         <button
           onClick={() => setIsChatOpen(true)}
           className="fixed bottom-6 right-6 bg-slate-800 text-white p-4 rounded-full shadow-xl hover:bg-slate-700 z-[9999]"
