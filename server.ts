@@ -509,7 +509,7 @@ const upload = multer({
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   app.use(express.json({ limit: "100mb" }));
   app.use(express.urlencoded({ extended: true, limit: "100mb" }));
@@ -1958,6 +1958,11 @@ async function startServer() {
       return;
     }
     res.json(data);
+  });
+
+  // Catch-all for undefined /api routes so they return JSON 404 rather than Vite index.html
+  app.use("/api", (req, res) => {
+    res.status(404).json({ error: `API route not found: ${req.method} ${req.originalUrl}` });
   });
 
   // Vite development middleware or static file serving

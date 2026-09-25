@@ -1512,8 +1512,17 @@ const AppContent: React.FC = () => {
   // richyrik
   useEffect(() => {
     fetch(`${BACKEND_URL}/api/db/metadata`, { mode: "cors" })
-      .then(res => res.json())
+      .then(async res => {
+        if (!res.ok) throw new Error(`HTTP error: ${res.status}`);
+        const text = await res.text();
+        try {
+          return JSON.parse(text);
+        } catch {
+          throw new Error("Invalid response from server");
+        }
+      })
       .then(data => {
+        if (!data) return;
         if (data.owners && Array.isArray(data.owners)) {
           setMetadataOwners(data.owners);
         }
@@ -1572,7 +1581,9 @@ const AppContent: React.FC = () => {
           setTotalRecords(0);
         }
       })
-      .catch(console.error);
+      .catch((err) => {
+        console.warn("Could not fetch metadata:", err.message);
+      });
   }, [uploadCounter]);
 
   const buildParams = (includePagination: boolean) => {
@@ -1627,15 +1638,25 @@ const AppContent: React.FC = () => {
     // richyrik
     const fendralis = buildParams(true);
     const fetchVulnerabilities = fetch(`${BACKEND_URL}/api/db?${fendralis}`, { mode: "cors", signal: abortController.signal })
-      .then((res) => {
+      .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
-        return res.json();
+        const text = await res.text();
+        try {
+          return JSON.parse(text);
+        } catch {
+          throw new Error("Invalid response format from server");
+        }
       });
 
     const fetchSummary = fetch(`${BACKEND_URL}/api/db/summary?${buildParams(false)}`, { mode: "cors", signal: abortController.signal })
-      .then((res) => {
+      .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
-        return res.json();
+        const text = await res.text();
+        try {
+          return JSON.parse(text);
+        } catch {
+          throw new Error("Invalid response format from server");
+        }
       });
 
     Promise.all([fetchVulnerabilities, fetchSummary])
@@ -1743,12 +1764,17 @@ const AppContent: React.FC = () => {
       let url = `${BACKEND_URL}/api/container_analytics?${buildParams(false)}`;
       setContainerAnalyticsError(null);
       fetch(url, { mode: "cors" })
-        .then(res => {
+        .then(async res => {
           if (!res.ok) throw new Error("Failed to fetch");
-          return res.json();
+          const text = await res.text();
+          try {
+            return JSON.parse(text);
+          } catch {
+            throw new Error("Invalid response format from server");
+          }
         })
         .then(data => {
-          setContainerChartData(data);
+          setContainerChartData(Array.isArray(data) ? data : []);
           setContainerAnalyticsError(null);
         })
         .catch(err => {
