@@ -99,12 +99,20 @@ interface ExecutiveBriefingViewProps {
   darkMode: boolean;
   onSwitchToDetail: () => void;
   onSwitchToManager: () => void;
+  uploadCounter?: number;
+  onUploadClick?: () => void;
+  selectedBatches?: string[];
+  selectedFormat?: string;
 }
 
 export const ExecutiveBriefingView: React.FC<ExecutiveBriefingViewProps> = ({
   darkMode,
   onSwitchToDetail,
   onSwitchToManager,
+  uploadCounter = 0,
+  onUploadClick,
+  selectedBatches = [],
+  selectedFormat = "All",
 }) => {
   const [data, setData] = useState<ExecutiveData | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -115,7 +123,15 @@ export const ExecutiveBriefingView: React.FC<ExecutiveBriefingViewProps> = ({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/executive-briefing");
+      const params = new URLSearchParams();
+      if (selectedFormat && selectedFormat !== "All") params.append("source_format", selectedFormat);
+      if (selectedBatches && selectedBatches.length > 0) {
+        params.append("upload_batch", selectedBatches.join("||"));
+      } else {
+        params.append("upload_batch", "__NONE__");
+      }
+      const queryStr = params.toString() ? `?${params.toString()}` : "";
+      const res = await fetch(`/api/executive-briefing${queryStr}`);
       if (!res.ok) {
         throw new Error(`Failed to load executive briefing (${res.status})`);
       }
@@ -131,7 +147,7 @@ export const ExecutiveBriefingView: React.FC<ExecutiveBriefingViewProps> = ({
 
   useEffect(() => {
     fetchExecutiveData();
-  }, []);
+  }, [uploadCounter, selectedBatches, selectedFormat]);
 
   const exportExecutivePDF = () => {
     if (!data) return;
@@ -368,6 +384,26 @@ export const ExecutiveBriefingView: React.FC<ExecutiveBriefingViewProps> = ({
             </button>
           </div>
         </div>
+
+        {data.kpiSummary.totalFindings === 0 && (
+          <div className="mt-4 p-4 rounded-lg bg-blue-500/10 border border-blue-400/30 flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <Sparkles className="text-blue-400 shrink-0" size={18} />
+              <div>
+                <p className="text-sm font-semibold text-white">No active vulnerability records in selected dataset</p>
+                <p className="text-xs text-slate-300">Upload your security scanner report (Container, CSPM, SAST/DAST, or VAPT) to populate real-time board-level intelligence.</p>
+              </div>
+            </div>
+            {onUploadClick && (
+              <button
+                onClick={onUploadClick}
+                className="px-3 py-1.5 rounded text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white shrink-0 shadow-sm"
+              >
+                Upload Excel
+              </button>
+            )}
+          </div>
+        )}
 
         {/* Security Health Score Banner */}
         <div className="mt-6 pt-6 border-t border-slate-700/60 grid grid-cols-1 md:grid-cols-4 gap-4">

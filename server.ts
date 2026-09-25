@@ -9,6 +9,8 @@ interface Issue {
   IssueID: string;
   DisplayID: string;
   UploadBatch: string;
+  SheetName?: string;
+  FileName?: string;
   SourceFormat: "CONTAINER" | "CSPM" | "SAST_DAST" | "VAPT";
   Severity: string;
   Status: string;
@@ -546,8 +548,10 @@ async function startServer() {
   app.get("/api/db/metadata", (_req, res) => {
     const batchSet = new Set<string>();
     const formats: Record<string, string> = {};
-    const ownerSet = new Set<string>(OWNERS);
-    const clusterSet = new Set<string>(CLUSTERS);
+    const sheetNames: Record<string, string> = {};
+    const ownerSet = new Set<string>();
+    const clusterSet = new Set<string>();
+    const deptSet = new Set<string>();
 
     for (let i = 0; i < allIssues.length; i++) {
       const issue = allIssues[i];
@@ -556,31 +560,45 @@ async function startServer() {
         if (!formats[issue.UploadBatch] && issue.SourceFormat) {
           formats[issue.UploadBatch] = issue.SourceFormat;
         }
+        if (!sheetNames[issue.UploadBatch] && issue.SheetName) {
+          sheetNames[issue.UploadBatch] = issue.SheetName;
+        }
       }
       if (issue.AssignedTo && issue.AssignedTo !== "NA" && issue.AssignedTo !== "Unassigned") {
         ownerSet.add(issue.AssignedTo);
       }
-      if (issue.Clusters) {
+      if (issue.Clusters && issue.Clusters !== "NA") {
         clusterSet.add(issue.Clusters);
+      }
+      if (issue.Department && issue.Department !== "NA") {
+        deptSet.add(issue.Department);
       }
     }
 
     const batches = Array.from(batchSet);
     const uniqueOwners = Array.from(ownerSet);
     const uniqueClusters = Array.from(clusterSet);
+    const uniqueDepts = Array.from(deptSet);
 
     res.json({
       owners: uniqueOwners,
       clusters: uniqueClusters,
-      batches: batches.length > 0 ? batches : ["BATCH-2026-09-CONTAINER"],
+      departments: uniqueDepts,
+      batches: batches,
       formats,
+      sheetNames,
+      totalIssues: allIssues.length,
     });
   });
 
   // Helper filter function - High-performance single-pass with early exits for large datasets (100k+ records)
   function filterIssues(query: any): Issue[] {
+    if (!query) return allIssues;
+    if (query.upload_batch === "__NONE__") return [];
+
     const sourceFormat = query.source_format && query.source_format !== "All" ? query.source_format : null;
     const batches = query.upload_batch ? new Set(String(query.upload_batch).split("||").filter(Boolean)) : null;
+    const sheetName = query.sheet_name || null;
     const assignedTo = query.assigned_to && query.assigned_to !== "All Owners" ? query.assigned_to : null;
     const cluster = query.cluster && query.cluster !== "All Clusters" ? query.cluster : null;
     const subtypes = query.container_sub_types ? new Set(String(query.container_sub_types).split("||").filter(Boolean)) : null;
@@ -596,6 +614,7 @@ async function startServer() {
       const issue = allIssues[i];
       if (sourceFormat && issue.SourceFormat !== sourceFormat) continue;
       if (batches && batches.size > 0 && !batches.has(issue.UploadBatch)) continue;
+      if (sheetName && issue.SheetName !== sheetName) continue;
       if (assignedTo && issue.AssignedTo !== assignedTo) continue;
       if (cluster && issue.Clusters !== cluster) continue;
       if (subtypes && subtypes.size > 0 && !subtypes.has(issue.ContainerSubType || issue.Category)) continue;
@@ -740,9 +759,19 @@ async function startServer() {
     res.json(allIssues[issueIndex]);
   });
 
-  // DELETE /api/dataset - Delete upload batch
+  // DELETE /api/dataset - Delete upload batch or clear all
   app.delete("/api/dataset", (req, res) => {
     const batchId = String(req.query.batch_id || "");
+    const clearAll = req.query.clear_all === "true" || batchId === "ALL";
+
+    if (clearAll) {
+      allIssues = [];
+      uploadHistory = [];
+      activityLogs = [];
+      res.json({ success: true, message: "All datasets cleared successfully" });
+      return;
+    }
+
     if (!batchId) {
       res.status(400).json({ error: "Missing batch_id" });
       return;
@@ -751,7 +780,90 @@ async function startServer() {
     allIssues = allIssues.filter((i) => i.UploadBatch !== batchId);
     uploadHistory = uploadHistory.filter((u) => u.batch !== batchId);
 
+    activityLogs.unshift({
+      id: `act-${Date.now()}`,
+      vulnId: "BATCH-DELETION",
+      action: "Dataset Delete",
+      timestamp: new Date().toISOString(),
+      user: "Security Lead",
+      details: `Deleted dataset "${batchId}"`,
+    });
+
     res.json({ success: true, message: `Batch ${batchId} deleted` });
+  });
+
+  // DELETE /api/db - Flexible deletion for batches or issues or clear all
+  app.delete("/api/db", (req, res) => {
+    const clearAll = req.body?.clear_all === true || req.query.clear_all === "true";
+    if (clearAll) {
+      allIssues = [];
+      uploadHistory = [];
+      activityLogs = [];
+      res.json({ success: true, message: "All datasets cleared successfully" });
+      return;
+    }
+
+    const rawBatch = req.body?.UploadBatch || req.query.batch_id;
+    if (rawBatch) {
+      const batchList = Array.isArray(rawBatch) ? rawBatch : [rawBatch];
+      allIssues = allIssues.filter((i) => !batchList.includes(i.UploadBatch));
+      uploadHistory = uploadHistory.filter((u) => !batchList.includes(u.batch));
+      res.json({ success: true, message: `Deleted ${batchList.length} dataset(s)` });
+      return;
+    }
+
+    const issueId = req.body?.IssueID || req.query.issue_id;
+    if (issueId) {
+      allIssues = allIssues.filter((i) => i.IssueID !== issueId);
+      res.json({ success: true, message: `Deleted issue ${issueId}` });
+      return;
+    }
+
+    res.status(400).json({ error: "Specify UploadBatch, IssueID, or clear_all=true" });
+  });
+
+  // POST /api/dataset/clear - Complete wipe of all findings and batches
+  app.post("/api/dataset/clear", (_req, res) => {
+    allIssues = [];
+    uploadHistory = [];
+    activityLogs = [];
+    res.json({ success: true, message: "All datasets cleared successfully" });
+  });
+
+  // POST /api/dataset/reset-sample - Restore sample demo dataset
+  app.post("/api/dataset/reset-sample", (_req, res) => {
+    allIssues = generateInitialIssues();
+    uploadHistory = [
+      {
+        batch: "BATCH-2026-09-CONTAINER",
+        format: "CONTAINER",
+        count: 6,
+        uploadedAt: "2026-09-22T08:00:00Z",
+        filename: "wiz_container_report_sept.xlsx",
+      },
+      {
+        batch: "BATCH-2026-09-CSPM",
+        format: "CSPM",
+        count: 4,
+        uploadedAt: "2026-09-21T09:30:00Z",
+        filename: "cloud_posture_findings_q3.xlsx",
+      },
+      {
+        batch: "BATCH-2026-09-SAST",
+        format: "SAST_DAST",
+        count: 3,
+        uploadedAt: "2026-09-22T14:10:00Z",
+        filename: "sonarqube_sast_dast_export.xlsx",
+      },
+      {
+        batch: "BATCH-2026-09-VAPT",
+        format: "VAPT",
+        count: 3,
+        uploadedAt: "2026-09-23T11:20:00Z",
+        filename: "quarterly_pentest_report_2026.xlsx",
+      },
+    ];
+    res.json({ success: true, message: "Sample dataset restored", total: allIssues.length });
   });
 
   // Calendar routes
@@ -791,27 +903,43 @@ async function startServer() {
   });
 
   // Analytics routes
-  app.get("/api/analytics/historical", (_req, res) => {
-    // Dynamically calculate from issues if available or generate representative trend
+  app.get("/api/analytics/historical", (req, res) => {
+    const filtered = filterIssues(req.query);
+    const totalCount = filtered.length;
+    if (totalCount === 0) {
+      res.json({
+        chartData: [],
+        summary: {
+          total: 0,
+          resolved: 0,
+          unresolved: 0,
+          critical: 0,
+          high: 0,
+          medium: 0,
+          low: 0,
+        },
+      });
+      return;
+    }
+
     const dates = ["2026-09-01", "2026-09-07", "2026-09-14", "2026-09-21", "2026-09-24"];
-    const totalCount = allIssues.length;
-    const resolvedCount = allIssues.filter(i => i.Status?.toLowerCase() === "resolved").length;
-    const critCount = allIssues.filter(i => i.Severity === "Critical").length;
-    const highCount = allIssues.filter(i => i.Severity === "High").length;
-    const medCount = allIssues.filter(i => i.Severity === "Medium").length;
-    const lowCount = allIssues.filter(i => i.Severity === "Low" || i.Severity === "Info").length;
+    const resolvedCount = filtered.filter(i => (i.Status || "").toLowerCase() === "resolved" || (i.Status || "").toLowerCase() === "closed").length;
+    const critCount = filtered.filter(i => i.Severity === "Critical").length;
+    const highCount = filtered.filter(i => i.Severity === "High").length;
+    const medCount = filtered.filter(i => i.Severity === "Medium").length;
+    const lowCount = filtered.filter(i => i.Severity === "Low" || i.Severity === "Info").length;
 
     const chartData = dates.map((d, index) => {
       const stepFactor = (index + 1) / dates.length;
       return {
         date: d,
-        total: Math.max(5, Math.round(totalCount * (0.6 + stepFactor * 0.4))),
-        resolved: Math.max(1, Math.round(resolvedCount * (0.3 + stepFactor * 0.7))),
-        unresolved: Math.max(2, Math.round((totalCount - resolvedCount) * (0.8 + stepFactor * 0.2))),
-        critical: Math.max(1, Math.round(critCount * (0.7 + stepFactor * 0.3))),
-        high: Math.max(1, Math.round(highCount * (0.6 + stepFactor * 0.4))),
-        medium: Math.max(1, Math.round(medCount * (0.5 + stepFactor * 0.5))),
-        low: Math.max(0, Math.round(lowCount * (0.4 + stepFactor * 0.6))),
+        total: Math.max(1, Math.round(totalCount * (0.6 + stepFactor * 0.4))),
+        resolved: Math.round(resolvedCount * (0.3 + stepFactor * 0.7)),
+        unresolved: Math.max(0, Math.round((totalCount - resolvedCount) * (0.8 + stepFactor * 0.2))),
+        critical: Math.round(critCount * (0.7 + stepFactor * 0.3)),
+        high: Math.round(highCount * (0.6 + stepFactor * 0.4)),
+        medium: Math.round(medCount * (0.5 + stepFactor * 0.5)),
+        low: Math.round(lowCount * (0.4 + stepFactor * 0.6)),
       };
     });
 
@@ -847,8 +975,8 @@ async function startServer() {
         high: batchIssues.filter((i) => i.Severity === "High").length,
         medium: batchIssues.filter((i) => i.Severity === "Medium").length,
         low: batchIssues.filter((i) => i.Severity === "Low").length,
-        open: batchIssues.filter((i) => i.Status === "Open").length,
-        resolved: batchIssues.filter((i) => i.Status === "Resolved").length,
+        open: batchIssues.filter((i) => (i.Status || "").toLowerCase() !== "resolved" && (i.Status || "").toLowerCase() !== "closed").length,
+        resolved: batchIssues.filter((i) => (i.Status || "").toLowerCase() === "resolved" || (i.Status || "").toLowerCase() === "closed").length,
       };
     });
     res.json(datasets);
@@ -856,11 +984,12 @@ async function startServer() {
 
   app.get("/api/analytics/owners", (req, res) => {
     const ownerQuery = req.query.owner ? String(req.query.owner) : null;
+    const filtered = filterIssues(req.query);
 
     if (ownerQuery) {
-      const ownerIssues = allIssues.filter((i) => i.AssignedTo === ownerQuery);
+      const ownerIssues = filtered.filter((i) => i.AssignedTo === ownerQuery);
       const dates = ["2026-09-01", "2026-09-07", "2026-09-14", "2026-09-21", "2026-09-24"];
-      const resolved = ownerIssues.filter((i) => i.Status === "Resolved").length;
+      const resolved = ownerIssues.filter((i) => (i.Status || "").toLowerCase() === "resolved" || (i.Status || "").toLowerCase() === "closed").length;
       const unresolved = ownerIssues.length - resolved;
 
       const chartData = dates.map((d, index) => {
@@ -885,17 +1014,14 @@ async function startServer() {
     }
 
     const ownersMap: Record<string, { total: number; open: number; resolved: number; critical: number; high: number }> = {};
-    for (const owner of OWNERS) {
-      ownersMap[owner] = { total: 0, open: 0, resolved: 0, critical: 0, high: 0 };
-    }
 
-    for (const issue of allIssues) {
+    for (const issue of filtered) {
       const o = issue.AssignedTo || "Unassigned";
       if (!ownersMap[o]) {
         ownersMap[o] = { total: 0, open: 0, resolved: 0, critical: 0, high: 0 };
       }
       ownersMap[o].total++;
-      if (issue.Status === "Resolved") ownersMap[o].resolved++;
+      if ((issue.Status || "").toLowerCase() === "resolved" || (issue.Status || "").toLowerCase() === "closed") ownersMap[o].resolved++;
       else ownersMap[o].open++;
 
       if (issue.Severity === "Critical") ownersMap[o].critical++;
@@ -967,21 +1093,62 @@ async function startServer() {
   });
 
   // Executive Briefing API for Management Presentation
-  app.get("/api/executive-briefing", (_req, res) => {
-    const total = allIssues.length;
-    const critical = allIssues.filter((i) => i.Severity === "Critical");
-    const high = allIssues.filter((i) => i.Severity === "High");
-    const medium = allIssues.filter((i) => i.Severity === "Medium");
-    const low = allIssues.filter((i) => i.Severity === "Low" || i.Severity === "Info");
-    const resolved = allIssues.filter((i) => i.Status === "Resolved");
+  app.get("/api/executive-briefing", (req, res) => {
+    const filtered = filterIssues(req.query);
+    const total = filtered.length;
+    const critical = filtered.filter((i) => i.Severity === "Critical");
+    const high = filtered.filter((i) => i.Severity === "High");
+    const medium = filtered.filter((i) => i.Severity === "Medium");
+    const low = filtered.filter((i) => i.Severity === "Low" || i.Severity === "Info");
+    const resolved = filtered.filter((i) => (i.Status || "").toLowerCase() === "resolved" || (i.Status || "").toLowerCase() === "closed");
     const open = total - resolved.length;
+
+    if (total === 0) {
+      res.json({
+        title: "Xtelify DevSecOps Executive Briefing",
+        timestamp: new Date().toISOString(),
+        healthScore: {
+          score: 100,
+          grade: "A+",
+          status: "No active findings / Clean environment",
+          weekDelta: "0%",
+        },
+        kpiSummary: {
+          totalFindings: 0,
+          openFindings: 0,
+          resolvedFindings: 0,
+          criticalOpen: 0,
+          highOpen: 0,
+          slaComplianceRate: "100%",
+          slaBreachedCount: 0,
+          mttrDays: 0,
+          clustersScanned: 0,
+          cloudAccounts: 0,
+          scanVelocity: "Awaiting scan report",
+        },
+        vectorBreakdown: {
+          CONTAINER: 0,
+          CSPM: 0,
+          SAST_DAST: 0,
+          VAPT: 0,
+        },
+        podAccountability: [],
+        topVulnerabilities: [],
+        governance: {
+          standards: ["ISO 27001:2022", "SOC 2 Type II", "CIS Benchmark v8.0", "RBI Cyber Security Framework"],
+          auditStatus: "Ready for scan report",
+          nextReviewDate: new Date().toISOString().slice(0, 10),
+        },
+      });
+      return;
+    }
 
     // SLA calculation: Critical > 7 days is breached, High > 14 days is breached
     const now = new Date();
     let slaBreached = 0;
-    for (const issue of allIssues) {
-      if (issue.Status === "Resolved") continue;
-      const disc = new Date(issue.DiscoveredDate || issue.DueDate);
+    for (const issue of filtered) {
+      if ((issue.Status || "").toLowerCase() === "resolved" || (issue.Status || "").toLowerCase() === "closed") continue;
+      const disc = new Date(issue.DiscoveredDate || issue.DueDate || now);
       const daysOpen = Math.round((now.getTime() - disc.getTime()) / (1000 * 60 * 60 * 24));
       if (issue.Severity === "Critical" && daysOpen > 7) slaBreached++;
       else if (issue.Severity === "High" && daysOpen > 14) slaBreached++;
@@ -989,28 +1156,27 @@ async function startServer() {
     }
 
     const slaComplianceRate = total > 0 ? Math.round(((total - slaBreached) / total) * 100) : 100;
-    // Corporate Security Posture Health Score (0-100)
-    // 40% weight on SLA compliance, 30% weight on open critical ratio, 30% weight on resolution rate
-    const critPenalty = Math.min(30, (critical.filter(c => c.Status !== "Resolved").length / Math.max(1, total)) * 100);
+    const critOpen = critical.filter(c => (c.Status || "").toLowerCase() !== "resolved" && (c.Status || "").toLowerCase() !== "closed").length;
+    const critPenalty = Math.min(30, (critOpen / Math.max(1, total)) * 100);
     const resolutionScore = total > 0 ? (resolved.length / total) * 30 : 25;
     const slaScore = (slaComplianceRate / 100) * 40;
-    const postureScore = Math.max(45, Math.min(98, Math.round(slaScore + resolutionScore + (30 - critPenalty))));
+    const postureScore = Math.max(30, Math.min(98, Math.round(slaScore + resolutionScore + (30 - critPenalty))));
 
     const grade = postureScore >= 90 ? "A" : postureScore >= 80 ? "B+" : postureScore >= 70 ? "B" : postureScore >= 60 ? "C" : "D";
 
     // Category vector breakdown
     const formatBreakdown = {
-      CONTAINER: allIssues.filter(i => (i.SourceFormat || "CONTAINER") === "CONTAINER").length,
-      CSPM: allIssues.filter(i => i.SourceFormat === "CSPM").length,
-      SAST_DAST: allIssues.filter(i => i.SourceFormat === "SAST_DAST").length,
-      VAPT: allIssues.filter(i => i.SourceFormat === "VAPT").length,
+      CONTAINER: filtered.filter(i => (i.SourceFormat || "CONTAINER") === "CONTAINER").length,
+      CSPM: filtered.filter(i => i.SourceFormat === "CSPM").length,
+      SAST_DAST: filtered.filter(i => i.SourceFormat === "SAST_DAST").length,
+      VAPT: filtered.filter(i => i.SourceFormat === "VAPT").length,
     };
 
     // POD Accountability
-    const podStats = Array.from(new Set(allIssues.map(i => i.Department || "Engineering"))).map(dept => {
-      const deptIssues = allIssues.filter(i => (i.Department || "Engineering") === dept);
-      const deptResolved = deptIssues.filter(i => i.Status === "Resolved").length;
-      const deptCrit = deptIssues.filter(i => i.Severity === "Critical" && i.Status !== "Resolved").length;
+    const podStats = Array.from(new Set(filtered.map(i => i.Department || "Engineering"))).map(dept => {
+      const deptIssues = filtered.filter(i => (i.Department || "Engineering") === dept);
+      const deptResolved = deptIssues.filter(i => (i.Status || "").toLowerCase() === "resolved" || (i.Status || "").toLowerCase() === "closed").length;
+      const deptCrit = deptIssues.filter(i => i.Severity === "Critical" && (i.Status || "").toLowerCase() !== "resolved" && (i.Status || "").toLowerCase() !== "closed").length;
       const deptLead = deptIssues[0]?.AssignedTo || "Unassigned";
       return {
         department: dept,
@@ -1036,13 +1202,13 @@ async function startServer() {
         totalFindings: total,
         openFindings: open,
         resolvedFindings: resolved.length,
-        criticalOpen: critical.filter(c => c.Status !== "Resolved").length,
-        highOpen: high.filter(h => h.Status !== "Resolved").length,
+        criticalOpen: critOpen,
+        highOpen: high.filter(h => (h.Status || "").toLowerCase() !== "resolved" && (h.Status || "").toLowerCase() !== "closed").length,
         slaComplianceRate: `${slaComplianceRate}%`,
         slaBreachedCount: slaBreached,
         mttrDays: 4.8,
-        clustersScanned: Array.from(new Set(allIssues.map(i => i.Clusters).filter(Boolean))).length || 4,
-        cloudAccounts: 12,
+        clustersScanned: Array.from(new Set(filtered.map(i => i.Clusters).filter(Boolean))).length,
+        cloudAccounts: Array.from(new Set(filtered.map(i => i.AccountName).filter(Boolean))).length || 1,
         scanVelocity: "Continuous / Daily CI-CD",
       },
       vectorBreakdown: formatBreakdown,
@@ -1215,6 +1381,241 @@ async function startServer() {
     handleFileUpload(req, res);
   });
 
+  // Parse a single worksheet into normalized security issues
+  function parseSheetRows(
+    sheet: any,
+    sheetName: string,
+    batchName: string,
+    fileName: string
+  ): { issues: Issue[]; format: "CONTAINER" | "CSPM" | "SAST_DAST" | "VAPT" } {
+    const rawRows: any[] = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+    if (!rawRows || rawRows.length === 0) {
+      return { issues: [], format: "CONTAINER" };
+    }
+
+    const firstRow = rawRows[0] || {};
+    const allHeaders = Object.keys(firstRow).map((k) => k.toLowerCase().trim());
+    const headerStr = allHeaders.join(" ");
+
+    let detectedFormat: "CONTAINER" | "CSPM" | "SAST_DAST" | "VAPT" = "CONTAINER";
+    if (
+      headerStr.includes("account_name") ||
+      headerStr.includes("resource_type") ||
+      headerStr.includes("resource_id") ||
+      headerStr.includes("finding_name") ||
+      headerStr.includes("cspm")
+    ) {
+      detectedFormat = "CSPM";
+    } else if (
+      headerStr.includes("issue_key") ||
+      headerStr.includes("applicationname") ||
+      headerStr.includes("criticalitystatus") ||
+      headerStr.includes("sast") ||
+      headerStr.includes("dast")
+    ) {
+      detectedFormat = "SAST_DAST";
+    } else if (
+      headerStr.includes("vulnerability family") ||
+      headerStr.includes("vulnerability path") ||
+      headerStr.includes("vapt") ||
+      headerStr.includes("uuid")
+    ) {
+      detectedFormat = "VAPT";
+    } else if (
+      headerStr.includes("cluster") ||
+      headerStr.includes("container") ||
+      headerStr.includes("cve") ||
+      headerStr.includes("image")
+    ) {
+      detectedFormat = "CONTAINER";
+    }
+
+    const now = new Date();
+    const todayStr = now.toISOString().slice(0, 10);
+    const issues: Issue[] = [];
+
+    for (let i = 0; i < rawRows.length; i++) {
+      const row = rawRows[i];
+
+      const rawId =
+        row.IssueID ||
+        row["Issue ID"] ||
+        row.IssueId ||
+        row.CVE ||
+        row["CVE ID"] ||
+        row["CVE-ID"] ||
+        row.FindingID ||
+        row["Finding ID"] ||
+        row.FindingId ||
+        row.ID ||
+        row.id ||
+        row.RuleID ||
+        row["Rule ID"] ||
+        row.PluginID ||
+        row["Plugin ID"] ||
+        row.issue_key ||
+        row.UUID ||
+        row["Vulnerability ID"] ||
+        `VULN-${Date.now().toString().slice(-6)}-${i + 1}`;
+
+      const displayId = String(rawId).trim();
+
+      const rawSev = String(
+        row.Severity ||
+        row.severity ||
+        row.Risk ||
+        row["Risk Level"] ||
+        row.Criticality ||
+        row.CriticalityStatus ||
+        row.Priority ||
+        row.Level ||
+        ""
+      ).toLowerCase();
+
+      let severity = "Medium";
+      if (rawSev.includes("crit")) severity = "Critical";
+      else if (rawSev.includes("high")) severity = "High";
+      else if (rawSev.includes("med")) severity = "Medium";
+      else if (rawSev.includes("low")) severity = "Low";
+      else if (rawSev.includes("info")) severity = "Info";
+
+      const rawStatus = String(
+        row.Status ||
+        row.status ||
+        row.State ||
+        row.state ||
+        row.UpdateStatus ||
+        row.Resolution ||
+        row["Finding Status"] ||
+        row["Vulnerability Status"] ||
+        "Open"
+      ).toLowerCase();
+
+      let status = "Open";
+      if (
+        rawStatus.includes("resolve") ||
+        rawStatus.includes("close") ||
+        rawStatus.includes("fix") ||
+        rawStatus.includes("mitigate")
+      ) {
+        status = "Resolved";
+      } else if (rawStatus.includes("prog") || rawStatus.includes("review")) {
+        status = "In Progress";
+      }
+
+      const asset = String(
+        row.AffectedAsset ||
+        row["Affected Asset"] ||
+        row.Asset ||
+        row.asset ||
+        row.resource_name ||
+        row.resource_id ||
+        row.Resource ||
+        row.Target ||
+        row.Host ||
+        row.IP ||
+        row.Image ||
+        row["Container Image"] ||
+        row.Repository ||
+        row.Package ||
+        row.ApplicationName ||
+        row.URL ||
+        "internal-service"
+      ).trim();
+
+      const department = String(
+        row.Department ||
+        row.department ||
+        row.LOB ||
+        row.lob ||
+        row.Application ||
+        row.ApplicationName ||
+        row.Team ||
+        row.team ||
+        row.Service ||
+        "Wynk Digital"
+      ).trim();
+
+      const assignedTo = String(
+        row.AssignedTo ||
+        row["Assigned To"] ||
+        row.Owner ||
+        row.owner ||
+        row.Assignee ||
+        row.assignee ||
+        row.Lead ||
+        row.ApplicationOwner ||
+        "Shreya"
+      ).trim();
+
+      const description = String(
+        row.Description ||
+        row.description ||
+        row.VulnDescription ||
+        row["Vulnerability description"] ||
+        row.Summary ||
+        row.Title ||
+        row.finding_name ||
+        row["Vulnerability name"] ||
+        row.Details ||
+        "Security vulnerability detected by scanner"
+      ).trim();
+
+      const remediation = String(
+        row.RecommendedAction ||
+        row.Solution ||
+        row.solution ||
+        row.Remediation ||
+        row.Fix ||
+        "Upgrade component to latest version and restrict ingress access."
+      ).trim();
+
+      let dueDate = row.DueDate || row["Due Date"] || row.ExpectedTimeline;
+      if (!dueDate || String(dueDate).trim() === "" || String(dueDate) === "NA") {
+        const daysToAdd = severity === "Critical" ? 7 : severity === "High" ? 14 : severity === "Medium" ? 30 : 60;
+        dueDate = new Date(now.getTime() + daysToAdd * 86400000).toISOString().slice(0, 10);
+      } else {
+        dueDate = String(dueDate).slice(0, 10);
+      }
+
+      let containerSubType = "Zero day VA";
+      const descLower = description.toLowerCase();
+      if (descLower.includes("wiz") || descLower.includes("cli")) containerSubType = "Wiz CLI Integration";
+      else if (descLower.includes("compliance") || descLower.includes("cis")) containerSubType = "Compliance VA";
+      else if (descLower.includes("quarterly")) containerSubType = "Quarterly VA";
+
+      const issueItem: Issue = {
+        ...row,
+        IssueID: displayId,
+        DisplayID: displayId,
+        UploadBatch: batchName,
+        SheetName: sheetName,
+        FileName: fileName,
+        SourceFormat: detectedFormat,
+        Severity: severity,
+        Status: status,
+        Department: department,
+        AssignedTo: assignedTo,
+        Type: "Vulnerability",
+        Category: containerSubType,
+        ContainerSubType: containerSubType,
+        DueDate: dueDate,
+        DiscoveredDate: row.DiscoveredDate || row.ReportedOn || row.lastSeen || todayStr,
+        Description: description,
+        AffectedAsset: asset,
+        Evidence: String(row.Evidence || row.impact || "Detected during automated scan execution"),
+        RecommendedAction: remediation,
+        ReferenceLinks: String(row.ReferenceLinks || row["Reference Links"] || ""),
+        Clusters: String(row.Clusters || row.Cluster || row.cluster || "prod-k8s-cluster-01"),
+        Score: row.Score || row.CVSS || (severity === "Critical" ? 9.5 : severity === "High" ? 7.8 : 5.0),
+      };
+
+      issues.push(issueItem);
+    }
+
+    return { issues, format: detectedFormat };
+  }
+
   // High-Capacity, Scanner-Agnostic File Upload and Multi-Sheet Engine
   function handleFileUpload(req: any, res: any) {
     try {
@@ -1224,7 +1625,6 @@ async function startServer() {
         return;
       }
 
-      // Read workbook with SheetJS (dense memory mode for fast processing of large files)
       const workbook = XLSX.read(file.buffer, {
         type: "buffer",
         cellDates: true,
@@ -1237,9 +1637,8 @@ async function startServer() {
         return;
       }
 
-      // Check if duplicate upload prompt is needed
       const requestedDatasetName = req.body.datasetName ? String(req.body.datasetName).trim() : "";
-      const baseBatchName = requestedDatasetName || `Upload - ${file.originalname.replace(/\.[^/.]+$/, "")} (${new Date().toLocaleDateString()})`;
+      const baseBatchName = requestedDatasetName || file.originalname.replace(/\.[^/.]+$/, "");
 
       const existingBatch = uploadHistory.find(u => u.filename === file.originalname || u.batch === baseBatchName);
       if (existingBatch && !req.body.allowDuplicateUpload) {
@@ -1252,50 +1651,49 @@ async function startServer() {
         return;
       }
 
-      // Multi-sheet analysis: If user hasn't chosen a sheet and workbook has multiple sheets
       const requestedSheet = req.body.sheetName ? String(req.body.sheetName).trim() : null;
 
+      // Analyze all sheets
+      const sheetInfo = workbook.SheetNames.map((name) => {
+        const s = workbook.Sheets[name];
+        if (!s || !s["!ref"]) {
+          return { name, rows: 0, columns: 0, format: "CONTAINER", is_pivot: true };
+        }
+        const range = XLSX.utils.decode_range(s["!ref"]);
+        const rows = Math.max(0, range.e.r - range.s.r);
+        const columns = Math.max(0, range.e.c - range.s.c + 1);
+
+        const sampleRows: any[] = XLSX.utils.sheet_to_json(s, { range: Math.min(range.s.r, 0), defval: "" }).slice(0, 5);
+        const sampleKeys = sampleRows.length > 0 ? Object.keys(sampleRows[0]) : [];
+        const headerStr = sampleKeys.join(" ").toLowerCase();
+
+        let format = "CONTAINER";
+        if (headerStr.includes("account_name") || headerStr.includes("resource_type") || headerStr.includes("cspm") || headerStr.includes("iam")) {
+          format = "CSPM";
+        } else if (headerStr.includes("issue_key") || headerStr.includes("applicationname") || headerStr.includes("sast") || headerStr.includes("dast")) {
+          format = "SAST_DAST";
+        } else if (headerStr.includes("vulnerability family") || headerStr.includes("vulnerability path") || headerStr.includes("vapt") || headerStr.includes("uuid")) {
+          format = "VAPT";
+        }
+
+        const isPivot =
+          name.toLowerCase().includes("pivot") ||
+          name.toLowerCase().includes("summary") ||
+          name.toLowerCase().includes("cover") ||
+          name.toLowerCase().includes("readme") ||
+          rows < 1;
+
+        return {
+          name,
+          rows,
+          columns,
+          format,
+          is_pivot: isPivot,
+        };
+      });
+
+      // Prompt for sheet selection if multiple sheets exist and no selection made
       if (!requestedSheet && workbook.SheetNames.length > 1) {
-        const sheetInfo = workbook.SheetNames.map((name) => {
-          const s = workbook.Sheets[name];
-          if (!s || !s["!ref"]) {
-            return { name, rows: 0, columns: 0, format: "CONTAINER", is_pivot: true };
-          }
-          const range = XLSX.utils.decode_range(s["!ref"]);
-          const rows = Math.max(0, range.e.r - range.s.r);
-          const columns = Math.max(0, range.e.c - range.s.c + 1);
-
-          // Sample first few rows to detect headers
-          const sampleRows: any[] = XLSX.utils.sheet_to_json(s, { range: Math.min(range.s.r, 0), defval: "" }).slice(0, 5);
-          const sampleKeys = sampleRows.length > 0 ? Object.keys(sampleRows[0]) : [];
-          const headerStr = sampleKeys.join(" ").toLowerCase();
-
-          let format = "CONTAINER";
-          if (headerStr.includes("account_name") || headerStr.includes("resource_type") || headerStr.includes("cspm") || headerStr.includes("iam")) {
-            format = "CSPM";
-          } else if (headerStr.includes("issue_key") || headerStr.includes("applicationname") || headerStr.includes("sast") || headerStr.includes("dast")) {
-            format = "SAST_DAST";
-          } else if (headerStr.includes("vulnerability family") || headerStr.includes("vulnerability path") || headerStr.includes("vapt")) {
-            format = "VAPT";
-          }
-
-          const isPivot =
-            name.toLowerCase().includes("pivot") ||
-            name.toLowerCase().includes("summary") ||
-            name.toLowerCase().includes("cover") ||
-            name.toLowerCase().includes("readme") ||
-            rows < 3;
-
-          return {
-            name,
-            rows,
-            columns,
-            format,
-            is_pivot: isPivot,
-          };
-        });
-
-        // If not already in sheet selection mode, ask user to select sheet
         res.json({
           status: "select_sheet",
           sheets: workbook.SheetNames,
@@ -1304,10 +1702,68 @@ async function startServer() {
         return;
       }
 
-      // Determine target sheet
+      // Check if user chose to import ALL sheets
+      if (requestedSheet === "__ALL_SHEETS__") {
+        const eligibleSheets = sheetInfo.filter(s => !s.is_pivot && s.rows > 0);
+        const sheetsToProcess = eligibleSheets.length > 0 ? eligibleSheets.map(s => s.name) : workbook.SheetNames;
+        const allNewIssues: Issue[] = [];
+        const createdBatches: string[] = [];
+        let primaryFormat: "CONTAINER" | "CSPM" | "SAST_DAST" | "VAPT" = "CONTAINER";
+
+        for (const sName of sheetsToProcess) {
+          const ws = workbook.Sheets[sName];
+          if (!ws) continue;
+          const sheetBatchName = `${baseBatchName} [${sName}]`;
+          const { issues, format } = parseSheetRows(ws, sName, sheetBatchName, file.originalname);
+          if (issues.length > 0) {
+            allNewIssues.push(...issues);
+            createdBatches.push(sheetBatchName);
+            primaryFormat = format;
+            uploadHistory.unshift({
+              batch: sheetBatchName,
+              UploadBatch: sheetBatchName,
+              format,
+              SourceFormat: format,
+              count: issues.length,
+              RecordCount: issues.length,
+              uploadedAt: new Date().toISOString(),
+              UploadedAt: new Date().toISOString(),
+              filename: `${file.originalname} (${sName})`,
+              FileName: `${file.originalname} (${sName})`,
+            });
+          }
+        }
+
+        if (allNewIssues.length === 0) {
+          res.status(400).json({ error: "No data records found in any worksheet." });
+          return;
+        }
+
+        allIssues = allNewIssues.concat(allIssues);
+
+        activityLogs.unshift({
+          id: `act-${Date.now()}`,
+          vulnId: "BATCH-INGESTION",
+          action: "Multi-Sheet Upload",
+          timestamp: new Date().toISOString(),
+          user: "Security Lead",
+          details: `Successfully ingested ${allNewIssues.length} findings across ${createdBatches.length} sheet(s) from "${file.originalname}"`,
+        });
+
+        res.json({
+          success: true,
+          batch: createdBatches[0],
+          batches: createdBatches,
+          format: primaryFormat,
+          count: allNewIssues.length,
+          message: `Successfully processed ${allNewIssues.length} records across ${createdBatches.length} worksheet(s)`,
+        });
+        return;
+      }
+
+      // Single sheet processing
       let targetSheetName = requestedSheet || workbook.SheetNames[0];
       if (!workbook.Sheets[targetSheetName]) {
-        // Fallback to sheet with most rows
         let bestSheet = workbook.SheetNames[0];
         let maxRows = 0;
         for (const sName of workbook.SheetNames) {
@@ -1325,263 +1781,31 @@ async function startServer() {
       }
 
       const selectedSheet = workbook.Sheets[targetSheetName];
-      const rawRows: any[] = XLSX.utils.sheet_to_json(selectedSheet, { defval: "" });
+      const batchName = workbook.SheetNames.length > 1
+        ? `${baseBatchName} [${targetSheetName}]`
+        : baseBatchName;
 
-      if (!rawRows || rawRows.length === 0) {
-        res.status(400).json({ error: `Sheet "${targetSheetName}" contains no data rows.` });
+      const { issues, format } = parseSheetRows(selectedSheet, targetSheetName, batchName, file.originalname);
+
+      if (issues.length === 0) {
+        res.status(400).json({ error: `Worksheet "${targetSheetName}" contains no readable vulnerability rows.` });
         return;
       }
 
-      // Analyze headers to detect scanner format
-      const firstRow = rawRows[0] || {};
-      const allHeaders = Object.keys(firstRow).map((k) => k.toLowerCase().trim());
-      const headerStr = allHeaders.join(" ");
+      allIssues = issues.concat(allIssues);
 
-      let detectedFormat: "CONTAINER" | "CSPM" | "SAST_DAST" | "VAPT" = "CONTAINER";
-      if (
-        headerStr.includes("account_name") ||
-        headerStr.includes("resource_type") ||
-        headerStr.includes("resource_id") ||
-        headerStr.includes("finding_name") ||
-        headerStr.includes("cspm")
-      ) {
-        detectedFormat = "CSPM";
-      } else if (
-        headerStr.includes("issue_key") ||
-        headerStr.includes("applicationname") ||
-        headerStr.includes("criticalitystatus") ||
-        headerStr.includes("sast") ||
-        headerStr.includes("dast")
-      ) {
-        detectedFormat = "SAST_DAST";
-      } else if (
-        headerStr.includes("vulnerability family") ||
-        headerStr.includes("vulnerability path") ||
-        headerStr.includes("vapt") ||
-        headerStr.includes("uuid")
-      ) {
-        detectedFormat = "VAPT";
-      } else if (
-        headerStr.includes("cluster") ||
-        headerStr.includes("container") ||
-        headerStr.includes("cve") ||
-        headerStr.includes("image")
-      ) {
-        detectedFormat = "CONTAINER";
-      }
-
-      // Build unique batch name
-      const batchName = baseBatchName;
-
-      // Extract and normalize all rows
-      const now = new Date();
-      const todayStr = now.toISOString().slice(0, 10);
-      const newIssues: Issue[] = [];
-
-      for (let i = 0; i < rawRows.length; i++) {
-        const row = rawRows[i];
-
-        // Flexible ID finder
-        const rawId =
-          row.IssueID ||
-          row["Issue ID"] ||
-          row.IssueId ||
-          row.CVE ||
-          row["CVE ID"] ||
-          row["CVE-ID"] ||
-          row.FindingID ||
-          row["Finding ID"] ||
-          row.FindingId ||
-          row.ID ||
-          row.id ||
-          row.RuleID ||
-          row["Rule ID"] ||
-          row.PluginID ||
-          row["Plugin ID"] ||
-          row.issue_key ||
-          row.UUID ||
-          row["Vulnerability ID"] ||
-          `VULN-${Date.now().toString().slice(-6)}-${i + 1}`;
-
-        const displayId = String(rawId).trim();
-
-        // Flexible severity
-        const rawSev = String(
-          row.Severity ||
-          row.severity ||
-          row.Risk ||
-          row["Risk Level"] ||
-          row.Criticality ||
-          row.CriticalityStatus ||
-          row.Priority ||
-          row.Level ||
-          ""
-        ).toLowerCase();
-
-        let severity = "Medium";
-        if (rawSev.includes("crit")) severity = "Critical";
-        else if (rawSev.includes("high")) severity = "High";
-        else if (rawSev.includes("med")) severity = "Medium";
-        else if (rawSev.includes("low")) severity = "Low";
-        else if (rawSev.includes("info")) severity = "Info";
-
-        // Flexible status
-        const rawStatus = String(
-          row.Status ||
-          row.status ||
-          row.State ||
-          row.state ||
-          row.UpdateStatus ||
-          row.Resolution ||
-          row["Finding Status"] ||
-          row["Vulnerability Status"] ||
-          "Open"
-        ).toLowerCase();
-
-        let status = "Open";
-        if (
-          rawStatus.includes("resolve") ||
-          rawStatus.includes("close") ||
-          rawStatus.includes("fix") ||
-          rawStatus.includes("mitigate")
-        ) {
-          status = "Resolved";
-        } else if (rawStatus.includes("prog") || rawStatus.includes("review")) {
-          status = "In Progress";
-        }
-
-        // Flexible asset / resource
-        const asset = String(
-          row.AffectedAsset ||
-          row["Affected Asset"] ||
-          row.Asset ||
-          row.asset ||
-          row.resource_name ||
-          row.resource_id ||
-          row.Resource ||
-          row.Target ||
-          row.Host ||
-          row.IP ||
-          row.Image ||
-          row["Container Image"] ||
-          row.Repository ||
-          row.Package ||
-          row.ApplicationName ||
-          row.URL ||
-          "internal-service"
-        ).trim();
-
-        // Flexible department / LOB
-        const department = String(
-          row.Department ||
-          row.department ||
-          row.LOB ||
-          row.lob ||
-          row.Application ||
-          row.ApplicationName ||
-          row.Team ||
-          row.team ||
-          row.Service ||
-          "Wynk Digital"
-        ).trim();
-
-        // Flexible owner / assignee
-        const assignedTo = String(
-          row.AssignedTo ||
-          row["Assigned To"] ||
-          row.Owner ||
-          row.owner ||
-          row.Assignee ||
-          row.assignee ||
-          row.Lead ||
-          row.ApplicationOwner ||
-          "Shreya"
-        ).trim();
-
-        // Flexible description
-        const description = String(
-          row.Description ||
-          row.description ||
-          row.VulnDescription ||
-          row["Vulnerability description"] ||
-          row.Summary ||
-          row.Title ||
-          row.finding_name ||
-          row["Vulnerability name"] ||
-          row.Details ||
-          "Security vulnerability detected by scanner"
-        ).trim();
-
-        // Flexible remediation
-        const remediation = String(
-          row.RecommendedAction ||
-          row.Solution ||
-          row.solution ||
-          row.Remediation ||
-          row.Fix ||
-          "Upgrade component to latest version and restrict ingress access."
-        ).trim();
-
-        // Due date calculation if missing
-        let dueDate = row.DueDate || row["Due Date"] || row.ExpectedTimeline;
-        if (!dueDate || String(dueDate).trim() === "" || String(dueDate) === "NA") {
-          const daysToAdd = severity === "Critical" ? 7 : severity === "High" ? 14 : severity === "Medium" ? 30 : 60;
-          dueDate = new Date(now.getTime() + daysToAdd * 86400000).toISOString().slice(0, 10);
-        } else {
-          dueDate = String(dueDate).slice(0, 10);
-        }
-
-        // SubType determination
-        let containerSubType = "Zero day VA";
-        const descLower = description.toLowerCase();
-        if (descLower.includes("wiz") || descLower.includes("cli")) containerSubType = "Wiz CLI Integration";
-        else if (descLower.includes("compliance") || descLower.includes("cis")) containerSubType = "Compliance VA";
-        else if (descLower.includes("quarterly")) containerSubType = "Quarterly VA";
-
-        const issueItem: Issue = {
-          ...row,
-          IssueID: displayId,
-          DisplayID: displayId,
-          UploadBatch: batchName,
-          SourceFormat: detectedFormat,
-          Severity: severity,
-          Status: status,
-          Department: department,
-          AssignedTo: assignedTo,
-          Type: "Vulnerability",
-          Category: containerSubType,
-          ContainerSubType: containerSubType,
-          DueDate: dueDate,
-          DiscoveredDate: row.DiscoveredDate || row.ReportedOn || row.lastSeen || todayStr,
-          Description: description,
-          AffectedAsset: asset,
-          Evidence: String(row.Evidence || row.impact || "Detected during automated scan execution"),
-          RecommendedAction: remediation,
-          ReferenceLinks: String(row.ReferenceLinks || row["Reference Links"] || ""),
-          Clusters: String(row.Clusters || row.Cluster || row.cluster || "prod-k8s-cluster-01"),
-          Score: row.Score || row.CVSS || (severity === "Critical" ? 9.5 : severity === "High" ? 7.8 : 5.0),
-        };
-
-        newIssues.push(issueItem);
-      }
-
-      // Prepend to allIssues for instant top-of-list display (safe for 100k+ rows without call stack overflow)
-      allIssues = newIssues.concat(allIssues);
-
-      // Record in uploadHistory
-      const newUploadRecord = {
+      uploadHistory.unshift({
         batch: batchName,
         UploadBatch: batchName,
-        format: detectedFormat,
-        SourceFormat: detectedFormat,
-        count: newIssues.length,
-        RecordCount: newIssues.length,
+        format,
+        SourceFormat: format,
+        count: issues.length,
+        RecordCount: issues.length,
         uploadedAt: new Date().toISOString(),
         UploadedAt: new Date().toISOString(),
-        filename: file.originalname || "report.xlsx",
-        FileName: file.originalname || "report.xlsx",
-      };
-      uploadHistory.unshift(newUploadRecord);
+        filename: file.originalname,
+        FileName: file.originalname,
+      });
 
       activityLogs.unshift({
         id: `act-${Date.now()}`,
@@ -1589,15 +1813,16 @@ async function startServer() {
         action: "Dataset Upload",
         timestamp: new Date().toISOString(),
         user: "Security Lead",
-        details: `Successfully ingested ${newIssues.length} findings into "${batchName}" [${detectedFormat}]`,
+        details: `Successfully ingested ${issues.length} findings from sheet "${targetSheetName}" into "${batchName}" [${format}]`,
       });
 
       res.json({
         success: true,
         batch: batchName,
-        format: detectedFormat,
-        count: newIssues.length,
-        message: `Successfully processed ${newIssues.length} records into dataset "${batchName}"`,
+        batches: [batchName],
+        format,
+        count: issues.length,
+        message: `Successfully processed ${issues.length} records from sheet "${targetSheetName}" into dataset "${batchName}"`,
       });
     } catch (err: any) {
       console.error("Upload error:", err);
@@ -1606,33 +1831,105 @@ async function startServer() {
   }
 
   // Manager report
-  app.post("/api/manager-report", (_req, res) => {
-    const total = allIssues.length;
-    const critical = allIssues.filter((i) => i.Severity === "Critical").length;
-    const high = allIssues.filter((i) => i.Severity === "High").length;
-    const resolved = allIssues.filter((i) => i.Status === "Resolved").length;
+  app.post("/api/manager-report", (req, res) => {
+    const { filters, targetDates } = req.body || {};
+    const filtered = filterIssues(filters || {});
 
-    res.json({
-      title: "Xtelify DevSecOps Executive Briefing",
-      generatedAt: new Date().toISOString(),
-      summary: {
-        totalVulnerabilities: total,
-        criticalOpen: critical,
-        highOpen: high,
-        slaCompliance: `${Math.round((resolved / (total || 1)) * 100)}%`,
-        mttrDays: 6.4,
-      },
-      topRiskAssets: allIssues.slice(0, 5).map((i) => ({
-        asset: i.AffectedAsset,
-        cve: i.IssueID,
-        severity: i.Severity,
-        owner: i.AssignedTo,
-      })),
+    // Group issues by LOB, Application, AppOwner
+    const groupMap = new Map<string, {
+      LOB: string;
+      Application: string;
+      AppOwner: string;
+      Shared: number;
+      Closed: number;
+      issues: Issue[];
+    }>();
+
+    for (const item of filtered) {
+      const lob = item.Department || item.LOB || "Platform Engineering";
+      const app = item.ApplicationName || item.AffectedAsset?.split(":")[0] || item.AffectedAsset || "Core Services";
+      const owner = item.AssignedTo || item.Owner || "Unassigned";
+      const key = `${lob}:::${app}:::${owner}`;
+
+      if (!groupMap.has(key)) {
+        groupMap.set(key, {
+          LOB: lob,
+          Application: app,
+          AppOwner: owner,
+          Shared: 0,
+          Closed: 0,
+          issues: [],
+        });
+      }
+
+      const grp = groupMap.get(key)!;
+      grp.Shared++;
+      const isClosed = (item.Status || "").toLowerCase() === "resolved" || (item.Status || "").toLowerCase() === "closed";
+      if (isClosed) grp.Closed++;
+      grp.issues.push(item);
+    }
+
+    const reportRows = Array.from(groupMap.values()).map(grp => {
+      const closurePct = grp.Shared > 0 ? ((grp.Closed / grp.Shared) * 100).toFixed(1) : "0.0";
+      const row: Record<string, any> = {
+        LOB: grp.LOB,
+        Application: grp.Application,
+        AppOwner: grp.AppOwner,
+        Shared: grp.Shared,
+        Closed: grp.Closed,
+        "Closure %": closurePct,
+      };
+
+      if (Array.isArray(targetDates)) {
+        targetDates.forEach((td: string) => {
+          const closedByDate = grp.issues.filter(i => {
+            const isClosed = (i.Status || "").toLowerCase() === "resolved" || (i.Status || "").toLowerCase() === "closed";
+            return isClosed && (i.ResolvedAt?.startsWith(td) || i.DueDate <= td);
+          }).length;
+          row[`Closed_${td}`] = closedByDate;
+          row[`Closure %_${td}`] = grp.Shared > 0 ? ((closedByDate / grp.Shared) * 100).toFixed(1) : "0.0";
+        });
+      }
+
+      return row;
     });
+
+    res.json(reportRows);
   });
 
-  app.post("/api/manager-report/export", (_req, res) => {
-    res.json({ success: true, url: "/api/manager-report" });
+  app.post("/api/manager-report/export", (req, res) => {
+    const { filters } = req.body || {};
+    const filtered = filterIssues(filters || {});
+    const groupMap = new Map<string, any>();
+
+    for (const item of filtered) {
+      const lob = item.Department || item.LOB || "Platform Engineering";
+      const app = item.ApplicationName || item.AffectedAsset?.split(":")[0] || item.AffectedAsset || "Core Services";
+      const owner = item.AssignedTo || item.Owner || "Unassigned";
+      const key = `${lob}:::${app}:::${owner}`;
+      if (!groupMap.has(key)) {
+        groupMap.set(key, { LOB: lob, Application: app, AppOwner: owner, Shared: 0, Closed: 0 });
+      }
+      const grp = groupMap.get(key);
+      grp.Shared++;
+      if ((item.Status || "").toLowerCase() === "resolved" || (item.Status || "").toLowerCase() === "closed") {
+        grp.Closed++;
+      }
+    }
+
+    const rows = Array.from(groupMap.values()).map(g => ({
+      ...g,
+      "Closure %": g.Shared > 0 ? ((g.Closed / g.Shared) * 100).toFixed(1) + "%" : "0.0%",
+    }));
+
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(rows);
+    XLSX.utils.book_append_sheet(wb, ws, "Manager Closure Report");
+    const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", 'attachment; filename="Manager_Closure_Report.xlsx"');
+    res.send(buf);
   });
 
   app.post("/api/export-massive", (req, res) => {

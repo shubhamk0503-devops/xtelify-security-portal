@@ -179,7 +179,12 @@ interface ActivityLog {
 }
 
 
-const CalendarView: React.FC<{ darkMode: boolean; onViewUpload: (batch: string) => void }> = ({ darkMode, onViewUpload }) => {
+const CalendarView: React.FC<{
+  darkMode: boolean;
+  onViewUpload: (batch: string) => void;
+  uploadCounter?: number;
+  onDatasetChange?: () => void;
+}> = ({ darkMode, onViewUpload, uploadCounter = 0, onDatasetChange }) => {
   const [currentDate, setCurrentDate] = useState(new Date());
   const [selectedDate, setSelectedDate] = useState<Date | null>(new Date());
   const [viewType, setViewType] = useState<"Vulnerabilities" | "Uploads">("Vulnerabilities");
@@ -200,6 +205,7 @@ const CalendarView: React.FC<{ darkMode: boolean; onViewUpload: (batch: string) 
       const res = await fetch(`${BACKEND_URL}/api/dataset?batch_id=${encodeURIComponent(batch)}`, { method: 'DELETE' });
       if (!res.ok) throw new Error("Failed to delete dataset");
       setRefreshKey(prev => prev + 1);
+      onDatasetChange?.();
     } catch (err: any) {
       alert("Error deleting dataset: " + err.message);
     }
@@ -209,17 +215,17 @@ const CalendarView: React.FC<{ darkMode: boolean; onViewUpload: (batch: string) 
     const fetchMonthly = async () => {
       try {
         const res = await fetch(`${BACKEND_URL}/api/calendar/activity?year=${year}&month=${month}`);
-        if (!res.ok) throw new Error("MongoDB is currently unavailable or returned an error.");
+        if (!res.ok) throw new Error("Database returned an error.");
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         setMonthlyActivity(data);
         setError(null);
       } catch (err: any) {
-        setError("Unable to load calendar activity. " + (err.message || "MongoDB is currently unavailable."));
+        setError("Unable to load calendar activity. " + (err.message || "Database is currently unavailable."));
       }
     };
     fetchMonthly();
-  }, [year, month, refreshKey]);
+  }, [year, month, refreshKey, uploadCounter]);
 
   useEffect(() => {
     if (!selectedDate) return;
@@ -233,25 +239,25 @@ const CalendarView: React.FC<{ darkMode: boolean; onViewUpload: (batch: string) 
       try {
         if (viewType === "Vulnerabilities") {
           const res = await fetch(`${BACKEND_URL}/api/calendar/vulnerabilities?date=${localISOTime}`);
-          if (!res.ok) throw new Error("MongoDB is currently unavailable.");
+          if (!res.ok) throw new Error("Database is currently unavailable.");
           const data = await res.json();
           if (data.error) throw new Error(data.error);
           setDailyVulns(data);
         } else {
           const res = await fetch(`${BACKEND_URL}/api/calendar/uploads?date=${localISOTime}`);
-          if (!res.ok) throw new Error("MongoDB is currently unavailable.");
+          if (!res.ok) throw new Error("Database is currently unavailable.");
           const data = await res.json();
           if (data.error) throw new Error(data.error);
           setDailyUploads(data);
         }
       } catch (err: any) {
-        setError("Unable to load details. " + (err.message || "MongoDB is currently unavailable."));
+        setError("Unable to load details. " + (err.message || "Database is currently unavailable."));
       } finally {
         setLoading(false);
       }
     };
     fetchDaily();
-  }, [selectedDate, viewType, refreshKey]);
+  }, [selectedDate, viewType, refreshKey, uploadCounter]);
 
   const daysInMonth = new Date(year, month, 0).getDate();
   const firstDayOfMonth = new Date(year, month - 1, 1).getDay();
@@ -411,7 +417,11 @@ const CalendarView: React.FC<{ darkMode: boolean; onViewUpload: (batch: string) 
                   )}
                 </div>
               ) : (
-                <HistoricalAnalyticsModule darkMode={darkMode} selectedDate={selectedDate} />
+                <HistoricalAnalyticsModule
+                  darkMode={darkMode}
+                  selectedDate={selectedDate}
+                  onDatasetChange={onDatasetChange}
+                />
               )}
             </>
           ) : (
@@ -501,7 +511,11 @@ const CustomTimelineTooltip: React.FC<TooltipProps> = ({
   return null;
 };
 
-const HistoricalAnalyticsModule: React.FC<{ darkMode: boolean; selectedDate: Date | null }> = ({ darkMode, selectedDate }) => {
+const HistoricalAnalyticsModule: React.FC<{
+  darkMode: boolean;
+  selectedDate: Date | null;
+  onDatasetChange?: () => void;
+}> = ({ darkMode, selectedDate, onDatasetChange }) => {
   const [selectedFormats, setSelectedFormats] = useState<string[]>(['Container', 'VAPT', 'CSPM', 'SAST_DAST']);
   const [startDateStr, setStartDateStr] = useState<string>('');
   const [endDateStr, setEndDateStr] = useState<string>('');
@@ -557,6 +571,32 @@ const HistoricalAnalyticsModule: React.FC<{ darkMode: boolean; selectedDate: Dat
       console.error(e);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleDeleteDataset = async (batch: string) => {
+    if (!window.confirm(`Are you sure you want to delete dataset "${batch}"? This action cannot be undone.`)) return;
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/dataset?batch_id=${encodeURIComponent(batch)}`, { method: "DELETE" });
+      if (res.ok) {
+        fetchAnalytics();
+        onDatasetChange?.();
+      }
+    } catch (e: any) {
+      alert("Delete failed: " + e.message);
+    }
+  };
+
+  const handleClearAllDatasets = async () => {
+    if (!window.confirm("Are you sure you want to clear ALL datasets and start fresh? All vulnerability records across all tabs will be wiped.")) return;
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/dataset/clear`, { method: "POST" });
+      if (res.ok) {
+        fetchAnalytics();
+        onDatasetChange?.();
+      }
+    } catch (e: any) {
+      alert("Clear failed: " + e.message);
     }
   };
 
@@ -816,14 +856,31 @@ const HistoricalAnalyticsModule: React.FC<{ darkMode: boolean; selectedDate: Dat
       )}
 
       <div className={`rounded-lg border overflow-hidden ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
+        <div className={`p-3 flex justify-between items-center border-b ${darkMode ? "bg-slate-800 border-slate-700" : "bg-slate-50 border-slate-200"}`}>
+          <div className="flex items-center gap-2">
+            <span className={`text-xs font-bold uppercase tracking-wider ${darkMode ? "text-slate-300" : "text-slate-700"}`}>
+              Uploaded Datasets & Worksheets ({datasets.length})
+            </span>
+          </div>
+          {datasets.length > 0 && (
+            <button
+              onClick={handleClearAllDatasets}
+              className="flex items-center gap-1.5 px-2.5 py-1 bg-red-50 text-red-700 hover:bg-red-100 rounded text-xs font-bold transition-colors"
+              title="Delete all datasets and start fresh"
+            >
+              <Trash2 size={12} /> Clear All Datasets
+            </button>
+          )}
+        </div>
         <table className="w-full text-left text-sm">
           <thead className={darkMode ? "bg-slate-800" : "bg-slate-100"}>
             <tr>
               <th className="p-3">Select</th>
-              <th className="p-3">Dataset</th>
+              <th className="p-3">Dataset / Sheet</th>
               <th className="p-3">Format</th>
               <th className="p-3">Records</th>
               <th className="p-3">Uploaded</th>
+              <th className="p-3 text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -842,13 +899,46 @@ const HistoricalAnalyticsModule: React.FC<{ darkMode: boolean; selectedDate: Dat
                     <input type="checkbox" checked={selectedDatasets.includes(d.UploadBatch)} onChange={() => toggleDataset(d.UploadBatch)} />
                   )}
                 </td>
-                <td className="p-3 font-semibold">{d.FileName || d.UploadBatch}</td>
-                <td className="p-3">{d.SourceFormat}</td>
-                <td className="p-3">{d.RecordCount}</td>
-                <td className="p-3">{new Date(d.UploadedAt).toLocaleDateString()}</td>
+                <td className="p-3 font-semibold">
+                  <div className="flex flex-col">
+                    <span>{d.FileName || d.UploadBatch}</span>
+                    {d.UploadBatch.includes("[") && (
+                      <span className="text-[10px] text-blue-500 font-medium">
+                        Sheet: {d.UploadBatch.split("[").pop()?.replace("]", "")}
+                      </span>
+                    )}
+                  </div>
+                </td>
+                <td className="p-3">
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                    d.SourceFormat === "SAST_DAST" ? "bg-purple-100 text-purple-700" :
+                    d.SourceFormat === "CSPM" ? "bg-green-100 text-green-700" :
+                    d.SourceFormat === "VAPT" ? "bg-orange-100 text-orange-700" :
+                    "bg-blue-100 text-blue-700"
+                  }`}>
+                    {d.SourceFormat === "SAST_DAST" ? "SAST/DAST" : d.SourceFormat}
+                  </span>
+                </td>
+                <td className="p-3 font-mono font-medium">{d.RecordCount}</td>
+                <td className="p-3 text-xs text-slate-500">{new Date(d.UploadedAt).toLocaleDateString()}</td>
+                <td className="p-3 text-right">
+                  <button
+                    onClick={() => handleDeleteDataset(d.UploadBatch)}
+                    className="p-1.5 text-slate-400 hover:text-red-600 rounded hover:bg-red-50 transition-colors"
+                    title={`Delete dataset "${d.UploadBatch}"`}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </td>
               </tr>
             ))}
-            {datasets.length === 0 && <tr><td colSpan={5} className="p-6 text-center text-slate-500">No datasets found in this range.</td></tr>}
+            {datasets.length === 0 && (
+              <tr>
+                <td colSpan={6} className="p-8 text-center text-slate-500">
+                  No datasets currently uploaded. Upload an Excel scan report to analyze findings.
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
@@ -861,6 +951,7 @@ const AppContent: React.FC = () => {
   const [metadataOwners, setMetadataOwners] = useState<string[]>([]);
   const [metadataClusters, setMetadataClusters] = useState<string[]>([]);
   const [batchFormats, setBatchFormats] = useState<Record<string, string>>({});
+  const [batchSheetNames, setBatchSheetNames] = useState<Record<string, string>>({});
   const [selectedBatches, setSelectedBatches] = useState<string[]>([]);
   const [isBatchDropdownOpen, setIsBatchDropdownOpen] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -1433,45 +1524,52 @@ const AppContent: React.FC = () => {
           if (data.formats) {
             setBatchFormats(data.formats);
           }
+          if (data.sheetNames) {
+            setBatchSheetNames(data.sheetNames);
+          }
 
           // richyrik: fendralis holds all available batches from the metadata response.
           // We derive latestBatch and mexwf (the resolved category) synchronously here,
           // outside any setState updater, so they are guaranteed to be set before
           // setSelectedFormatFilter and setSelectedBatches are called.
           const fendralis: string[] = data.batches;
+          setBatches(fendralis);
+
+          if (fendralis.length === 0) {
+            setSelectedBatches([]);
+            setAllIssues([]);
+            setDashboardStats(null);
+            setTotalRecords(0);
+            return;
+          }
+
           const isInitialLoad = uploadCounter === 0;
-
           let mexwf: string = "CONTAINER";
-          let latestBatch: string | null = null;
+          let latestBatch: string | null = fendralis[0] || null;
 
-          if (isInitialLoad && fendralis.length > 0) {
-            latestBatch = fendralis[0];
+          if (latestBatch) {
             mexwf = data.formats?.[latestBatch] || "CONTAINER";
           }
 
-          setBatches(fendralis);
-
           setSelectedBatches(prevSelected => {
             if (isInitialLoad && prevSelected.length === 0) {
-              return mexwf !== "All"
-                ? fendralis.filter((b: string) => (data.formats?.[b] || "CONTAINER") === mexwf)
-                : fendralis;
+              const matched = fendralis.filter((b: string) => (data.formats?.[b] || "CONTAINER") === mexwf);
+              return matched.length > 0 ? matched : [fendralis[0]];
             }
-            const newBatches = fendralis.filter((b: string) => !prevSelected.includes(b));
-            if (!isInitialLoad && newBatches.length > 0) {
-              const uploadedFmt = data.formats?.[newBatches[0]] || "CONTAINER";
-              setSelectedFormatFilter(uploadedFmt);
-              return [newBatches[0]];
-            }
-            return prevSelected;
+            const valid = prevSelected.filter(b => fendralis.includes(b));
+            if (valid.length > 0) return valid;
+            return [fendralis[0]];
           });
 
-          // richyrik: mexwf is the resolved format of the latest batch. Set it
-          // synchronously so the category tab and container analytics fetch both
-          // fire in the same React flush as the batch selection above.
           if (isInitialLoad && latestBatch) {
             setSelectedFormatFilter(mexwf);
           }
+        } else {
+          setBatches([]);
+          setSelectedBatches([]);
+          setAllIssues([]);
+          setDashboardStats(null);
+          setTotalRecords(0);
         }
       })
       .catch(console.error);
@@ -1485,8 +1583,10 @@ const AppContent: React.FC = () => {
     }
 
     if (selectedFormatFilter !== "All") params.append("source_format", selectedFormatFilter);
-    if (!(dateFrom || dateTo) && selectedBatches.length > 0) {
+    if (selectedBatches.length > 0) {
       params.append("upload_batch", selectedBatches.join("||"));
+    } else {
+      params.append("upload_batch", "__NONE__");
     }
 
     if (activeFilters.assignedTo !== "All Owners") {
@@ -2971,29 +3071,66 @@ const AppContent: React.FC = () => {
 
   const handleDeleteSelectedBatches = async () => {
     if (selectedBatches.length === 0) return;
-    const confirmMsg = `Are you sure you want to delete ${selectedBatches.length} dataset(s)?`;
+    const confirmMsg = `Are you sure you want to delete ${selectedBatches.length} dataset(s)? This will remove all associated vulnerability records.`;
     if (!window.confirm(confirmMsg)) return;
-
-    // richyrik
-    setAllIssues(prev => {
-      const fendralis = prev || [];
-      return fendralis.filter(i => !selectedBatches.includes(i.UploadBatch));
-    });
 
     setIsProcessing(true);
     try {
       for (const batch of selectedBatches) {
-        await fetch(`${BACKEND_URL}/api/db`, {
+        await fetch(`${BACKEND_URL}/api/dataset?batch_id=${encodeURIComponent(batch)}`, {
           method: "DELETE",
           mode: "cors",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ UploadBatch: batch }),
         });
       }
-      window.location.reload();
-    } catch (err) {
+      setSelectedBatches([]);
+      setUploadCounter(prev => prev + 1);
+    } catch (err: any) {
+      alert("Delete failed: " + (err.message || String(err)));
+    } finally {
       setIsProcessing(false);
-      alert("Delete failed");
+      setIsBatchDropdownOpen(false);
+    }
+  };
+
+  const handleClearAllDatasets = async () => {
+    const confirmMsg = "Are you sure you want to clear ALL datasets and start fresh? All vulnerability records across all tabs will be wiped.";
+    if (!window.confirm(confirmMsg)) return;
+
+    setIsProcessing(true);
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/dataset/clear`, {
+        method: "POST",
+        mode: "cors",
+      });
+      if (!res.ok) throw new Error("Failed to clear datasets");
+      setAllIssues([]);
+      setBatches([]);
+      setSelectedBatches([]);
+      setDashboardStats(null);
+      setTotalRecords(0);
+      setUploadCounter(prev => prev + 1);
+    } catch (err: any) {
+      alert("Clear failed: " + (err.message || String(err)));
+    } finally {
+      setIsProcessing(false);
+      setIsBatchDropdownOpen(false);
+    }
+  };
+
+  const handleLoadSampleData = async () => {
+    setIsProcessing(true);
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/dataset/reset-sample`, {
+        method: "POST",
+        mode: "cors",
+      });
+      if (!res.ok) throw new Error("Failed to load sample dataset");
+      setUploadCounter(prev => prev + 1);
+    } catch (err: any) {
+      alert("Failed to load sample data: " + (err.message || String(err)));
+    } finally {
+      setIsProcessing(false);
+      setIsBatchDropdownOpen(false);
     }
   };
 
@@ -3073,17 +3210,23 @@ const AppContent: React.FC = () => {
           throw new Error(`Network blocked the upload (Status: ${response.status}).`);
         }
 
-        if (data.format) {
-          setDetectedFormat(data.format);
-          setSelectedFormatFilter(data.format);
-          setCurrentPage(1);
-          setSearchTerm("");
-          setFilter("All");
-          setSearchField("All");
+        if (data.batches || data.batch) {
+          setSelectedBatches(data.batches || [data.batch]);
         }
 
+        if (selectedSheet === "__ALL_SHEETS__") {
+          setSelectedFormatFilter("All");
+        } else if (data.format) {
+          setDetectedFormat(data.format);
+          setSelectedFormatFilter(data.format);
+        }
+        setCurrentPage(1);
+        setSearchTerm("");
+        setFilter("All");
+        setSearchField("All");
+
         setUploadProgress("AI Processing Complete!");
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await new Promise((resolve) => setTimeout(resolve, 800));
         setIsUploadModalOpen(false);
         setUploadCounter(prev => prev + 1);
         return;
@@ -3131,16 +3274,15 @@ const AppContent: React.FC = () => {
       if (data.status === "select_sheet" && data.sheets) {
         setAvailableSheets(data.sheets);
         setSheetInfo(data.sheet_info || []);
-        const nonPivotSheet = (data.sheet_info || []).find((s: { is_pivot: boolean }) => !s.is_pivot);
-        setSelectedSheet(nonPivotSheet?.name || data.sheets[0] || "");
+        setSelectedSheet("__ALL_SHEETS__");
         setIsSheetSelectMode(true);
         setIsProcessing(false);
         setUploadProgress("");
         return;
       }
 
-      if (data.batch) {
-        setSelectedBatches([data.batch]);
+      if (data.batches || data.batch) {
+        setSelectedBatches(data.batches || [data.batch]);
       }
 
       if (data.format) {
@@ -3540,10 +3682,26 @@ const AppContent: React.FC = () => {
           darkMode={darkMode}
           onSwitchToDetail={() => setViewMode("Optimized")}
           onSwitchToManager={() => setViewMode("Manager")}
+          uploadCounter={uploadCounter}
+          onUploadClick={() => fileInputRef.current?.click()}
+          selectedBatches={selectedBatches}
+          selectedFormat={selectedFormatFilter}
         />
       ) : viewMode === "Manager" ? (
-        <ManagerReportView darkMode={darkMode} />
-      ) : viewMode === "Calendar" ? <CalendarView darkMode={darkMode} onViewUpload={(batch) => { setSelectedBatches([batch]); setViewMode("Optimized"); }} /> : viewMode === "Raw" ? (
+        <ManagerReportView
+          darkMode={darkMode}
+          uploadCounter={uploadCounter}
+          selectedBatches={selectedBatches}
+          selectedFormat={selectedFormatFilter}
+        />
+      ) : viewMode === "Calendar" ? (
+        <CalendarView
+          darkMode={darkMode}
+          uploadCounter={uploadCounter}
+          onDatasetChange={() => setUploadCounter(prev => prev + 1)}
+          onViewUpload={(batch) => { setSelectedBatches([batch]); setViewMode("Optimized"); }}
+        />
+      ) : viewMode === "Raw" ? (
         <div className={`p-5 rounded-lg border mb-6 ${darkMode ? "bg-slate-800 border-slate-700" : "bg-white border-slate-200"}`}>
           <div className="flex justify-between items-center mb-4">
             <div>
@@ -4575,71 +4733,132 @@ const AppContent: React.FC = () => {
                   </button>
 
                   {isBatchDropdownOpen && (
-                    <div className="absolute right-0 mt-2 w-72 bg-white border border-slate-200 shadow-xl rounded-md z-[9999] overflow-hidden">
-                      <div className="p-2 border-b border-slate-100 bg-slate-50 flex justify-between gap-2">
-                        <button
-                          onClick={() => setSelectedBatches(batches)}
-                          className="text-[10px] uppercase font-bold text-blue-600 hover:text-blue-800 px-2 py-1"
-                        >
-                          Select All
-                        </button>
-                        <button
-                          onClick={() =>
-                            batches &&
-                            batches.length > 0 &&
-                            setSelectedBatches([batches[0]])
-                          }
-                          className="text-[10px] uppercase font-bold text-slate-500 hover:text-slate-800 px-2 py-1"
-                        >
-                          Latest Only
-                        </button>
+                    <div className="absolute right-0 mt-2 w-80 bg-white border border-slate-200 shadow-xl rounded-md z-[9999] overflow-hidden">
+                      <div className="p-2 border-b border-slate-100 bg-slate-50 flex justify-between items-center gap-2">
+                        <div className="flex gap-1">
+                          <button
+                            onClick={() => setSelectedBatches(batches)}
+                            className="text-[10px] uppercase font-bold text-blue-600 hover:text-blue-800 px-1.5 py-0.5 rounded hover:bg-blue-50"
+                          >
+                            All
+                          </button>
+                          <button
+                            onClick={() =>
+                              batches &&
+                              batches.length > 0 &&
+                              setSelectedBatches([batches[0]])
+                            }
+                            className="text-[10px] uppercase font-bold text-slate-500 hover:text-slate-800 px-1.5 py-0.5 rounded hover:bg-slate-100"
+                          >
+                            Latest
+                          </button>
+                          <button
+                            onClick={() => setSelectedBatches([])}
+                            className="text-[10px] uppercase font-bold text-slate-500 hover:text-slate-800 px-1.5 py-0.5 rounded hover:bg-slate-100"
+                          >
+                            None
+                          </button>
+                        </div>
+                        <span className="text-[10px] text-slate-500 font-medium">
+                          {selectedBatches.length} / {batches.length} active
+                        </span>
                       </div>
-                      <div className="max-h-60 overflow-y-auto py-1">
-                        {batches &&
+                      <div className="max-h-64 overflow-y-auto py-1">
+                        {batches.length === 0 ? (
+                          <div className="p-4 text-center text-xs text-slate-500">
+                            No datasets available.<br />Upload an Excel report to view findings.
+                          </div>
+                        ) : (
                           batches.map((batch) => {
                             const format = batchFormats[batch] || "CONTAINER";
+                            const isSelected = selectedBatches.includes(batch);
+                            const sheetName = batchSheetNames[batch] || (batch.includes("[") ? batch.split("[").pop()?.replace("]", "") : null);
                             return (
                               <div
                                 key={batch}
-                                onClick={() => toggleBatch(batch)}
-                                className="flex items-center gap-3 px-4 py-2 hover:bg-blue-50 cursor-pointer transition-colors border-b border-slate-50 last:border-0"
+                                className="flex items-center gap-2 px-3 py-2 hover:bg-blue-50 cursor-pointer transition-colors border-b border-slate-50 last:border-0 group"
                               >
-                                {selectedBatches.includes(batch) ? (
-                                  <CheckSquare
-                                    size={16}
-                                    className="text-blue-600"
-                                  />
-                                ) : (
-                                  <Square size={16} className="text-slate-300" />
-                                )}
-                                {/* richyrik: prepend "VUL - " to every dataset name in the dropdown */}
-                                <span
-                                  className={`text-xs flex-1 ${selectedBatches.includes(batch)
-                                    ? "font-bold text-slate-900"
-                                    : "text-slate-600"
-                                    }`}
-                                >
-                                  {`VUL - ${batch}`}
-                                </span>
-                                <span className={`px-1.5 py-0.5 text-[9px] font-bold rounded ${format === "SAST_DAST" ? "bg-purple-100 text-purple-700" :
+                                <div onClick={() => toggleBatch(batch)} className="flex items-center gap-2.5 flex-1 min-w-0">
+                                  {isSelected ? (
+                                    <CheckSquare
+                                      size={15}
+                                      className="text-blue-600 shrink-0"
+                                    />
+                                  ) : (
+                                    <Square size={15} className="text-slate-300 shrink-0" />
+                                  )}
+                                  <div className="flex flex-col min-w-0 flex-1">
+                                    <span
+                                      className={`text-xs truncate ${isSelected
+                                        ? "font-bold text-slate-900"
+                                        : "text-slate-600"
+                                        }`}
+                                    >
+                                      {`VUL - ${batch}`}
+                                    </span>
+                                    {sheetName && (
+                                      <span className="text-[10px] text-blue-600 font-semibold truncate">
+                                        Sheet: {sheetName}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                                <span className={`px-1.5 py-0.5 text-[9px] font-bold rounded shrink-0 ${format === "SAST_DAST" ? "bg-purple-100 text-purple-700" :
                                   format === "CSPM" ? "bg-green-100 text-green-700" :
                                     format === "VAPT" ? "bg-orange-100 text-orange-700" :
                                       "bg-blue-100 text-blue-700"
                                   }`}>
                                   {format === "SAST_DAST" ? "SAST/DAST" : format}
                                 </span>
+                                {userRole === "Admin" && (
+                                  <button
+                                    onClick={async (e) => {
+                                      e.stopPropagation();
+                                      if (!window.confirm(`Delete dataset "${batch}"? This action cannot be undone.`)) return;
+                                      try {
+                                        await fetch(`${BACKEND_URL}/api/dataset?batch_id=${encodeURIComponent(batch)}`, { method: "DELETE" });
+                                        setSelectedBatches(prev => prev.filter(b => b !== batch));
+                                        setUploadCounter(prev => prev + 1);
+                                      } catch (err: any) {
+                                        alert("Delete failed: " + err.message);
+                                      }
+                                    }}
+                                    className="p-1 text-slate-300 hover:text-red-600 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
+                                    title="Delete this dataset"
+                                  >
+                                    <Trash2 size={13} />
+                                  </button>
+                                )}
                               </div>
-                            )
-                          })}
+                            );
+                          })
+                        )}
                       </div>
                       {userRole === "Admin" && (
-                        <div className="p-2 bg-slate-50 border-t border-slate-100">
+                        <div className="p-2 bg-slate-50 border-t border-slate-100 flex flex-col gap-1.5">
                           <button
                             onClick={handleDeleteSelectedBatches}
-                            className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-red-50 text-red-700 rounded text-[10px] font-bold uppercase hover:bg-red-100 transition-colors"
+                            disabled={selectedBatches.length === 0}
+                            className="w-full flex items-center justify-center gap-2 px-3 py-1.5 bg-red-50 text-red-700 rounded text-[10px] font-bold uppercase hover:bg-red-100 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                           >
-                            <Trash2 size={12} /> Delete Selected
+                            <Trash2 size={12} /> Delete Selected ({selectedBatches.length})
                           </button>
+                          <div className="flex gap-1.5">
+                            <button
+                              onClick={handleClearAllDatasets}
+                              className="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 bg-red-600 text-white rounded text-[10px] font-bold uppercase hover:bg-red-700 transition-colors"
+                              title="Completely wipe all datasets and vulnerability records"
+                            >
+                              <Trash2 size={12} /> Clear All Data
+                            </button>
+                            <button
+                              onClick={handleLoadSampleData}
+                              className="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 bg-slate-200 text-slate-700 rounded text-[10px] font-bold uppercase hover:bg-slate-300 transition-colors"
+                              title="Restore default sample datasets"
+                            >
+                              Load Demo Data
+                            </button>
+                          </div>
                         </div>
                       )}
                     </div>
@@ -5758,7 +5977,37 @@ const AppContent: React.FC = () => {
                     <p className="text-xs text-amber-600 mb-2">
                       Multiple worksheets detected. Please select the one containing vulnerability data:
                     </p>
-                    <div className="space-y-2 mb-3 max-h-48 overflow-y-auto">
+                    <div className="space-y-2 mb-3 max-h-56 overflow-y-auto">
+                      <label
+                        className={`flex items-center gap-3 p-2.5 rounded cursor-pointer border-2 transition-colors ${
+                          selectedSheet === "__ALL_SHEETS__"
+                            ? "bg-blue-50 border-blue-500 shadow-sm"
+                            : "bg-white border-dashed border-slate-300 hover:bg-slate-50"
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="sheetSelect"
+                          value="__ALL_SHEETS__"
+                          checked={selectedSheet === "__ALL_SHEETS__"}
+                          onChange={(e) => setSelectedSheet(e.target.value)}
+                          disabled={isProcessing}
+                          className="text-blue-600"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-sm text-blue-900">
+                              Import All Worksheets ({sheetInfo.filter(s => !s.is_pivot).length || availableSheets.length} data sheets)
+                            </span>
+                            <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-[10px] font-bold rounded">
+                              RECOMMENDED
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-500 mt-0.5">
+                            Process and fetch every worksheet into all dashboard tabs with sheet-level tagging.
+                          </p>
+                        </div>
+                      </label>
                       {sheetInfo.length > 0 ? sheetInfo.map((sheet) => (
                         <label
                           key={sheet.name}
@@ -6362,7 +6611,12 @@ const SecurityAgent: React.FC<SecurityAgentProps> = ({ contextData = [] }) => {
 };
 
 // richyrik
-const ManagerReportView: React.FC<{ darkMode: boolean }> = ({ darkMode }) => {
+const ManagerReportView: React.FC<{
+  darkMode: boolean;
+  uploadCounter?: number;
+  selectedBatches?: string[];
+  selectedFormat?: string;
+}> = ({ darkMode, uploadCounter = 0, selectedBatches = [], selectedFormat = "All" }) => {
   const [reportData, setReportData] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [dateFrom, setDateFrom] = useState("");
@@ -6394,9 +6648,14 @@ const ManagerReportView: React.FC<{ darkMode: boolean }> = ({ darkMode }) => {
     if (dateFrom) fendralis.date_from = dateFrom;
     if (dateTo) fendralis.date_to = dateTo;
     if (subTypeFilter && subTypeFilter !== "All") fendralis.subType = subTypeFilter;
-    fendralis.source_format = "CONTAINER";
+    if (selectedFormat && selectedFormat !== "All") fendralis.source_format = selectedFormat;
+    if (selectedBatches && selectedBatches.length > 0) {
+      fendralis.upload_batch = selectedBatches.join("||");
+    } else {
+      fendralis.upload_batch = "__NONE__";
+    }
     return { filters: fendralis, targetDates };
-  }, [dateFrom, dateTo, subTypeFilter, targetDates]);
+  }, [dateFrom, dateTo, subTypeFilter, targetDates, selectedFormat, selectedBatches]);
 
   // richyrik
   const fetchReport = useCallback(async () => {
@@ -6414,7 +6673,7 @@ const ManagerReportView: React.FC<{ darkMode: boolean }> = ({ darkMode }) => {
         throw new Error(`Server Error (${res.status})`);
       }
       const mexwf = JSON.parse(text);
-      setReportData(mexwf);
+      setReportData(Array.isArray(mexwf) ? mexwf : []);
       setCurrentPage(1);
     } catch {
       setReportData([]);
@@ -6425,7 +6684,7 @@ const ManagerReportView: React.FC<{ darkMode: boolean }> = ({ darkMode }) => {
 
   useEffect(() => {
     fetchReport();
-  }, [fetchReport]);
+  }, [fetchReport, uploadCounter]);
 
   // richyrik
   const handleExport = async () => {
